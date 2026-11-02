@@ -34,6 +34,51 @@ def test_same_idempotency_key_sends_once(tmp_path, monkeypatch):
     assert [request.url.path for request in calls].count("/v1/payments/payouts") == 1
 
 
+def test_post_uses_bearer_token_from_token_endpoint(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        if request.url.path == "/v1/oauth2/token":
+            return httpx.Response(
+                200, json={"access_token": "tok_test_123", "expires_in": 3600}
+            )
+        assert request.url.path == "/v1/payments/payouts"
+        assert request.headers["Authorization"] == "Bearer tok_test_123"
+        return httpx.Response(
+            201,
+            json={
+                "batch_header": {
+                    "payout_batch_id": "batch-auth",
+                    "batch_status": "PENDING",
+                }
+            },
+        )
+
+    with PayPalClient(
+        db_path=str(tmp_path / "payouts.db"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    ) as client:
+        result = client.send_payout("key-auth", "receiver@example.com", "1.00", "Test")
+
+    assert result["status"] == "pending"
+    assert [request.url.path for request in calls] == [
+        "/v1/oauth2/token",
+        "/v1/payments/payouts",
+    ]
+
+
+def test_http_client_uses_explicit_paypal_timeout(tmp_path):
+    client = PayPalClient(db_path=str(tmp_path / "payouts.db"))
+    try:
+        assert client._http.timeout.connect == 10.0
+        assert client._http.timeout.read == 60.0
+    finally:
+        client.close()
+
+
 def test_self_pay_error_is_recorded_as_failed(tmp_path, monkeypatch):
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")

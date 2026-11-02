@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import time
@@ -15,6 +16,7 @@ import httpx
 FINAL_STATUSES = {"SUCCESS", "DENIED", "FAILED"}
 FAILURE_NAMES = {"DENIED", "FAILED", "SELF_PAY_NOT_ALLOWED", "UNCLAIMED"}
 PAYPAL_NOTE_TEMPLATE = "Leash payout"
+PAYPAL_TIMEOUT = httpx.Timeout(60.0, connect=10.0)
 
 
 class PayPalClient:
@@ -29,7 +31,7 @@ class PayPalClient:
         monotonic: Any = time.monotonic,
     ) -> None:
         self.db_path = db_path or os.getenv("PAYOUTS_DB_PATH", "payouts.db")
-        self._http = http_client or httpx.Client()
+        self._http = http_client or httpx.Client(timeout=PAYPAL_TIMEOUT)
         self._owns_http_client = http_client is None
         self._sleep = sleep
         self._monotonic = monotonic
@@ -92,6 +94,7 @@ class PayPalClient:
             data={"grant_type": "client_credentials"},
             headers={"Accept": "application/json"},
         )
+        self._capture_response("POST /v1/oauth2/token", response)
         response.raise_for_status()
         payload = response.json()
         token = payload.get("access_token")
@@ -138,15 +141,17 @@ class PayPalClient:
         }
 
         try:
+            access_token = self.get_access_token()
             response = self._http.post(
                 f"{self._base_url}/v1/payments/payouts",
                 headers={
-                    "Authorization": f"Bearer {self.get_access_token()}",
+                    "Authorization": "Bearer " + access_token,
                     "Content-Type": "application/json",
                     "PayPal-Request-Id": idempotency_key,
                 },
                 json=payload,
             )
+            self._capture_response("POST /v1/payments/payouts", response)
             response.raise_for_status()
             response_payload = response.json()
             batch_header = response_payload.get("batch_header", {})
@@ -156,10 +161,12 @@ class PayPalClient:
             status = self._local_status(batch_header.get("batch_status", "pending"))
             return self._save_record(idempotency_key, status, batch_id, None)
         except (httpx.ReadTimeout, httpx.ConnectError) as error:
+            self._capture_exception("POST /v1/payments/payouts", error)
             return self._save_record(
                 idempotency_key, "needs_reconcile", None, self._error_name(error)
             )
         except httpx.HTTPStatusError as error:
+            self._capture_exception("POST /v1/payments/payouts", error)
             if error.response.status_code >= 500:
                 return self._save_record(
                     idempotency_key, "needs_reconcile", None, self._error_name(error)
@@ -168,6 +175,7 @@ class PayPalClient:
                 idempotency_key, "failed", None, self._error_name(error)
             )
         except (httpx.HTTPError, RuntimeError, ValueError) as error:
+            self._capture_exception("POST /v1/payments/payouts", error)
             error_name = self._error_name(error)
             return self._save_record(idempotency_key, "needs_reconcile", None, error_name)
 
@@ -181,13 +189,18 @@ class PayPalClient:
             }
 
         try:
+            access_token = self.get_access_token()
             response = self._http.get(
                 f"{self._base_url}/v1/payments/payouts/{paypal_batch_id}",
-                headers={"Authorization": f"Bearer {self.get_access_token()}"},
+                headers={"Authorization": "Bearer " + access_token},
+            )
+            self._capture_response(
+                f"GET /v1/payments/payouts/{paypal_batch_id}", response
             )
             response.raise_for_status()
             payload = response.json()
         except (httpx.ReadTimeout, httpx.ConnectError) as error:
+            self._capture_exception("GET /v1/payments/payouts", error)
             error_name = self._error_name(error)
             self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
             return {
@@ -195,6 +208,7 @@ class PayPalClient:
                 "error_name": error_name,
             }
         except httpx.HTTPStatusError as error:
+            self._capture_exception("GET /v1/payments/payouts", error)
             error_name = self._error_name(error)
             if error.response.status_code >= 500:
                 self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
@@ -206,6 +220,7 @@ class PayPalClient:
                 "error_name": error_name,
             }
         except (httpx.HTTPError, RuntimeError, ValueError) as error:
+            self._capture_exception("GET /v1/payments/payouts", error)
             error_name = self._error_name(error)
             self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
             return {"status": "needs_reconcile", "error_name": error_name}
@@ -213,6 +228,12 @@ class PayPalClient:
         batch_header = payload.get("batch_header", {})
         item = (payload.get("items") or [{}])[0]
         error = item.get("errors") or {}
+        self._capture_json(
+            "GET /v1/payments/payouts",
+            payload,
+            batch_header.get("batch_status"),
+            batch_header.get("payout_batch_id"),
+        )
         if not isinstance(batch_header.get("batch_status"), str):
             self._update_by_batch_id(paypal_batch_id, "needs_reconcile", "UNRECOGNIZABLE_RESPONSE")
             return {"status": "needs_reconcile", "error_name": "UNRECOGNIZABLE_RESPONSE"}
@@ -267,6 +288,61 @@ class PayPalClient:
         if not amount.is_finite() or amount <= 0:
             raise ValueError("amount_usd must be a positive number")
         return f"{amount.quantize(Decimal('0.01')):.2f}"
+
+    def _capture_response(self, operation: str, response: httpx.Response) -> None:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        batch_header = payload.get("batch_header", {}) if isinstance(payload, dict) else {}
+        self._write_diagnostic(
+            {
+                "operation": operation,
+                "status_code": response.status_code,
+                "response_header_names": sorted(response.headers.keys()),
+                "top_level_json_keys": (
+                    sorted(payload.keys()) if isinstance(payload, dict) else []
+                ),
+                "batch_status": batch_header.get("batch_status"),
+                "payout_batch_id": batch_header.get("payout_batch_id"),
+            }
+        )
+
+    def _capture_json(
+        self,
+        operation: str,
+        payload: dict[str, Any],
+        batch_status: Any,
+        payout_batch_id: Any,
+    ) -> None:
+        self._write_diagnostic(
+            {
+                "operation": operation,
+                "top_level_json_keys": sorted(payload.keys()),
+                "batch_status": batch_status,
+                "payout_batch_id": payout_batch_id,
+            }
+        )
+
+    def _capture_exception(self, operation: str, error: Exception) -> None:
+        self._write_diagnostic(
+            {
+                "operation": operation,
+                "exception_class": error.__class__.__name__,
+                "exception_message": self._safe_text(str(error)),
+            }
+        )
+
+    def _write_diagnostic(self, entry: dict[str, Any]) -> None:
+        path = os.getenv("LEASH_PAYPAL_DIAG_PATH")
+        if not path:
+            return
+        with open(path, "a", encoding="utf-8") as diagnostic_file:
+            diagnostic_file.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _safe_text(value: str) -> str:
+        return value.replace("Authorization", "<redacted-header>")
 
     def _get_record(self, idempotency_key: str) -> dict[str, Any] | None:
         with sqlite3.connect(self.db_path) as connection:

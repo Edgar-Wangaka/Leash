@@ -4,5 +4,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 payouts.db
+leash-live.db
+paypal-live-diag.jsonl
 *.egg-info/
 .DS_Store
