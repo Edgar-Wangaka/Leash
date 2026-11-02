@@ -421,7 +421,7 @@ def _concurrent_http_gate(tmp_path, monkeypatch, post_count):
 
 def test_decisions_table_has_unique_request_id(tmp_path):
     policy_path = tmp_path / "policy.json"
-    write_policy(policy_path, approval_threshold_usd=100)
+    write_policy(policy_path, approval_threshold_usd=10)
     with PaymentGate(db_path=str(tmp_path / "leash.db"), policy_path=policy_path) as gate:
         first = gate.process(make_request("unique-1"))
         with sqlite3.connect(tmp_path / "leash.db") as db:
@@ -460,6 +460,67 @@ def test_concurrent_same_request_id_pays_once(tmp_path, monkeypatch):
 
     assert len(posts) == 1
     assert all(result["request_id"] == "concurrent-1" for result in results)
+
+
+def test_atomic_claim_across_gate_instances_pays_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
+    posts = []
+    lock = threading.Lock()
+
+    def handler(request):
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(
+                200, json={"access_token": "token", "expires_in": 3600}
+            )
+        if request.method == "POST" and request.url.path.endswith("/payouts"):
+            with lock:
+                posts.append(request)
+            return httpx.Response(
+                201,
+                json={"batch_header": {
+                    "payout_batch_id": f"batch-{len(posts)}",
+                    "batch_status": "SUCCESS",
+                }},
+            )
+        raise AssertionError(f"unexpected HTTP request: {request.method} {request.url}")
+
+    policy_path = tmp_path / "policy.json"
+    write_policy(policy_path, approval_threshold_usd=10)
+    gates = []
+    for index in range(2):
+        gates.append(
+            PaymentGate(
+                db_path=str(tmp_path / "shared-leash.db"),
+                policy_path=policy_path,
+                payout_client=PayPalClient(
+                    db_path=str(tmp_path / f"payouts-{index}.db"),
+                    http_client=httpx.Client(
+                        transport=httpx.MockTransport(handler)
+                    ),
+                ),
+            )
+        )
+    held = gates[0].process(make_request("cross-gate-claim", amount=10))
+    barrier = threading.Barrier(2)
+
+    def worker(gate):
+        barrier.wait()
+        gate._pay(
+            held,
+            make_request("cross-gate-claim", amount=10),
+            approved_by="reviewer",
+        )
+
+    threads = [threading.Thread(target=worker, args=(gate,)) for gate in gates]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for gate in gates:
+        gate.close()
+
+    assert len(posts) == 1
 
 
 def test_two_threads_approving_same_hold_pay_once(tmp_path, monkeypatch):
@@ -564,3 +625,51 @@ def test_expired_hold_does_not_pay(tmp_path, monkeypatch):
     assert result["status"] == "rejected_on_recheck"
     assert result["error_name"] == "APPROVAL_EXPIRED"
     assert posts == []
+
+
+def test_golden_denied_batch_maps_to_failed(tmp_path, monkeypatch):
+    golden = json.loads(
+        (ROOT / "tests" / "fixtures" / "paypal_batch_denied.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    posts = []
+
+    def handler(request):
+        if request.method == "POST" and request.url.path.endswith("/payouts"):
+            posts.append(request)
+            if request.headers["PayPal-Request-Id"] == "golden-denied":
+                return httpx.Response(
+                    201,
+                    json={"batch_header": {
+                        "payout_batch_id": "VXNTQBPKYGVVU",
+                        "batch_status": "PENDING",
+                    }},
+                )
+            return httpx.Response(
+                201,
+                json={"batch_header": {
+                    "payout_batch_id": "follow-up",
+                    "batch_status": "SUCCESS",
+                }},
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/payouts/VXNTQBPKYGVVU"
+        ):
+            return httpx.Response(200, json=golden)
+        return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+
+    gate, _, _ = paypal_gate(
+        tmp_path,
+        oauth_or(handler),
+        {"daily_budget_usd": 1, "approval_threshold_usd": 100},
+        monkeypatch,
+    )
+    with gate:
+        result = gate.process(make_request("golden-denied", amount=1))
+        follow_up = gate.process(make_request("golden-follow-up", amount=1))
+
+    assert result["status"] == "failed"
+    assert result["error_name"] == "SELF_PAY_NOT_ALLOWED"
+    assert follow_up["status"] == "paid"
+    assert len(posts) == 2
