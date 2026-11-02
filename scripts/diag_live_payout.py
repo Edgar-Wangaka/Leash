@@ -6,11 +6,12 @@ import json
 import os
 import sqlite3
 import uuid
+import argparse
 from decimal import Decimal
 from pathlib import Path
 
 from leash.gate import PaymentGate
-from leash.policy import PaymentRequest
+from leash.policy import PaymentRequest, load_policy
 from payouts.paypal_client import PAYPAL_TIMEOUT, PayPalClient
 
 
@@ -30,8 +31,32 @@ def _print_timeout(client: PayPalClient) -> None:
     )
 
 
-def main() -> int:
-    receiver = os.getenv("PAYPAL_RECEIVER_EMAIL") or _required("RECEIVER_EMAIL")
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run one sanitized live sandbox payout diagnostic."
+    )
+    parser.add_argument("--receiver", help="allowlisted PayPal sandbox receiver email")
+    return parser.parse_args(argv)
+
+
+def _validate_receiver(receiver: str | None) -> str:
+    if not receiver or not receiver.strip():
+        raise SystemExit("receiver is required: use --receiver <email>")
+    receiver = receiver.strip()
+    policy = load_policy(Path(__file__).parents[1] / "config" / "policy.json")
+    allowlist = {email.casefold() for email in policy["merchant_allowlist"]}
+    if receiver.casefold() not in allowlist:
+        raise SystemExit("receiver is not present in config/policy.json merchant_allowlist")
+    sender = os.getenv("PAYPAL_SENDER_EMAIL") or os.getenv("SENDER_EMAIL")
+    if sender and receiver.casefold() == sender.strip().casefold():
+        raise SystemExit("receiver must not be the sender's own account")
+    return receiver
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    receiver = _validate_receiver(args.receiver)
+    print(f"receiver={receiver}")
     base_url = _required("PAYPAL_BASE_URL").rstrip("/")
     if base_url != "https://api-m.sandbox.paypal.com":
         raise SystemExit("PAYPAL_BASE_URL must be the PayPal sandbox URL")
