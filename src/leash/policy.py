@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -35,6 +35,18 @@ class PaymentRequest:
 class Decision:
     verdict: str
     reasons: list[str]
+
+
+def amount_to_cents(amount_usd: Decimal | str | float) -> int:
+    """Convert a USD amount to integer cents without binary-float drift."""
+    amount = Decimal(str(amount_usd)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("amount_usd must be a positive number")
+    return int(amount * 100)
+
+
+def cents_to_amount(cents: int) -> Decimal:
+    return (Decimal(cents) / 100).quantize(Decimal("0.01"))
 
 
 def load_policy(path: str | Path | None = None) -> dict[str, Any]:

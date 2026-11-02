@@ -14,6 +14,7 @@ import httpx
 
 FINAL_STATUSES = {"SUCCESS", "DENIED", "FAILED"}
 FAILURE_NAMES = {"DENIED", "FAILED", "SELF_PAY_NOT_ALLOWED", "UNCLAIMED"}
+PAYPAL_NOTE_TEMPLATE = "Leash payout"
 
 
 class PayPalClient:
@@ -150,11 +151,25 @@ class PayPalClient:
             response_payload = response.json()
             batch_header = response_payload.get("batch_header", {})
             batch_id = batch_header.get("payout_batch_id")
+            if not batch_id or not isinstance(batch_header.get("batch_status"), str):
+                raise ValueError("PayPal payout response was unrecognizable")
             status = self._local_status(batch_header.get("batch_status", "pending"))
             return self._save_record(idempotency_key, status, batch_id, None)
+        except (httpx.ReadTimeout, httpx.ConnectError) as error:
+            return self._save_record(
+                idempotency_key, "needs_reconcile", None, self._error_name(error)
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code >= 500:
+                return self._save_record(
+                    idempotency_key, "needs_reconcile", None, self._error_name(error)
+                )
+            return self._save_record(
+                idempotency_key, "failed", None, self._error_name(error)
+            )
         except (httpx.HTTPError, RuntimeError, ValueError) as error:
             error_name = self._error_name(error)
-            return self._save_record(idempotency_key, "failed", None, error_name)
+            return self._save_record(idempotency_key, "needs_reconcile", None, error_name)
 
     def get_payout_status(self, paypal_batch_id: str) -> dict[str, Any]:
         """Return batch status and the first payout item's transaction status."""
@@ -172,18 +187,35 @@ class PayPalClient:
             )
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, RuntimeError, ValueError) as error:
+        except (httpx.ReadTimeout, httpx.ConnectError) as error:
             error_name = self._error_name(error)
+            self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
+            return {
+                "status": "needs_reconcile",
+                "error_name": error_name,
+            }
+        except httpx.HTTPStatusError as error:
+            error_name = self._error_name(error)
+            if error.response.status_code >= 500:
+                self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
+                return {"status": "needs_reconcile", "error_name": error_name}
             self._update_by_batch_id(paypal_batch_id, "failed", error_name)
             return {
                 "batch_status": "FAILED",
                 "transaction_status": "FAILED",
                 "error_name": error_name,
             }
+        except (httpx.HTTPError, RuntimeError, ValueError) as error:
+            error_name = self._error_name(error)
+            self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
+            return {"status": "needs_reconcile", "error_name": error_name}
 
         batch_header = payload.get("batch_header", {})
         item = (payload.get("items") or [{}])[0]
         error = item.get("errors") or {}
+        if not isinstance(batch_header.get("batch_status"), str):
+            self._update_by_batch_id(paypal_batch_id, "needs_reconcile", "UNRECOGNIZABLE_RESPONSE")
+            return {"status": "needs_reconcile", "error_name": "UNRECOGNIZABLE_RESPONSE"}
         return {
             "batch_status": batch_header.get("batch_status"),
             "transaction_status": item.get("transaction_status"),
@@ -197,6 +229,8 @@ class PayPalClient:
         deadline = self._monotonic() + timeout_s
         while True:
             status = self.get_payout_status(paypal_batch_id)
+            if status.get("status") == "needs_reconcile":
+                return status
             batch_status = status.get("batch_status")
             transaction_status = status.get("transaction_status")
             error_name = status.get("error_name")
@@ -232,7 +266,7 @@ class PayPalClient:
             raise ValueError("amount_usd must be a positive number") from error
         if not amount.is_finite() or amount <= 0:
             raise ValueError("amount_usd must be a positive number")
-        return f"{amount:.2f}"
+        return f"{amount.quantize(Decimal('0.01')):.2f}"
 
     def _get_record(self, idempotency_key: str) -> dict[str, Any] | None:
         with sqlite3.connect(self.db_path) as connection:

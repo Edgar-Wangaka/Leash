@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import pytest
+import httpx
 
 from leash.gate import PaymentGate
 from leash.policy import PaymentRequest, evaluate
+from payouts.paypal_client import PayPalClient
 
 
 POLICY = {
@@ -76,19 +78,19 @@ def test_each_rule_has_pass_and_fail(rule, passing, failing):
     assert rule in evaluate(failing_request, failing).reasons
 
 
-def test_blocking_injected_request_never_pays(tmp_path):
-    class NeverPay:
-        def __init__(self):
-            self.calls = 0
+def test_blocking_injected_request_never_pays(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
+    calls = []
 
-        def send_payout(self, *args):
-            self.calls += 1
-            raise AssertionError("blocked request reached PayPal")
+    def handler(request):
+        calls.append(request)
+        raise AssertionError("blocked request reached PayPal")
 
-        def close(self):
-            pass
-
-    payout = NeverPay()
+    payout = PayPalClient(
+        db_path=str(tmp_path / "payouts.db"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
     with PaymentGate(db_path=str(tmp_path / "leash.db"), payout_client=payout) as gate:
         result = gate.process(
             request(amount=200, email="unknown@example.com", task="unapproved")
@@ -102,26 +104,33 @@ def test_blocking_injected_request_never_pays(tmp_path):
         "approval_threshold",
         "unrequested_task",
     ]
-    assert payout.calls == 0
+    assert calls == []
 
 
-def test_same_request_id_pays_once(tmp_path):
-    class FakePayout:
-        def __init__(self):
-            self.calls = 0
+def test_same_request_id_pays_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
+    calls = []
 
-        def send_payout(self, *args):
-            self.calls += 1
-            return {"status": "success", "paypal_batch_id": "batch-1"}
+    def handler(request):
+        calls.append(request)
+        if request.url.path.endswith("/oauth2/token"):
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        return httpx.Response(
+            201,
+            json={"batch_header": {
+                "payout_batch_id": "batch-1", "batch_status": "SUCCESS"
+            }},
+        )
 
-        def close(self):
-            pass
-
-    payout = FakePayout()
+    payout = PayPalClient(
+        db_path=str(tmp_path / "payouts.db"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
     with PaymentGate(db_path=str(tmp_path / "leash.db"), payout_client=payout) as gate:
         first = gate.process(request(email="sb-fwgx550980251@personal.example.com"))
         second = gate.process(request(email="sb-fwgx550980251@personal.example.com"))
 
     assert first["status"] == "paid"
     assert second["status"] == "paid"
-    assert payout.calls == 1
+    assert [call.url.path for call in calls].count("/v1/payments/payouts") == 1
