@@ -8,6 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "httpx",
+    "mcp>=2,<3",
 ]
 
 [project.optional-dependencies]
@@ -21,3 +22,6 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+leash = ["*.html"]

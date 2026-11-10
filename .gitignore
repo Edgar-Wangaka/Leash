@@ -6,3 +6,8 @@ __pycache__/
 payouts.db
 *.egg-info/
 .DS_Store
+.leash-channel3-cache.json
+leash.db
+*.db-journal
+*-dry-run.db
+submission/

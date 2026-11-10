@@ -1,0 +1,15 @@
+{
+  "per_transaction_cap_usd": 25,
+  "daily_budget_usd": 60,
+  "merchant_allowlist": [
+    "sb-fwgx550980251@personal.example.com",
+    "sb-ze5vz53545847@personal.example.com"
+  ],
+  "approval_threshold_usd": 10,
+  "max_requests_per_minute": 5,
+  "human_approval_expiry_hours": 24,
+  "approved_task_ids": [
+    "demo-legitimate-task",
+    "demo-review-task"
+  ]
+}

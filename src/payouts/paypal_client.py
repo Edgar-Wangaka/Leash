@@ -150,11 +150,22 @@ class PayPalClient:
             response_payload = response.json()
             batch_header = response_payload.get("batch_header", {})
             batch_id = batch_header.get("payout_batch_id")
-            status = self._local_status(batch_header.get("batch_status", "pending"))
+            status = self._local_status(batch_header.get("batch_status"))
             return self._save_record(idempotency_key, status, batch_id, None)
-        except (httpx.HTTPError, RuntimeError, ValueError) as error:
+        except (httpx.TimeoutException, httpx.NetworkError) as error:
+            return self._save_record(
+                idempotency_key, "needs_reconcile", None, None
+            )
+        except httpx.HTTPStatusError as error:
             error_name = self._error_name(error)
-            return self._save_record(idempotency_key, "failed", None, error_name)
+            status = "needs_reconcile" if error.response.status_code >= 500 else "failed"
+            return self._save_record(
+                idempotency_key, status, None, error_name if status == "failed" else None
+            )
+        except (RuntimeError, ValueError) as error:
+            return self._save_record(
+                idempotency_key, "needs_reconcile", None, None
+            )
 
     def get_payout_status(self, paypal_batch_id: str) -> dict[str, Any]:
         """Return batch status and the first payout item's transaction status."""
@@ -174,11 +185,12 @@ class PayPalClient:
             payload = response.json()
         except (httpx.HTTPError, RuntimeError, ValueError) as error:
             error_name = self._error_name(error)
-            self._update_by_batch_id(paypal_batch_id, "failed", error_name)
+            self._update_by_batch_id(paypal_batch_id, "needs_reconcile", error_name)
             return {
-                "batch_status": "FAILED",
-                "transaction_status": "FAILED",
+                "batch_status": None,
+                "transaction_status": None,
                 "error_name": error_name,
+                "transport_error": True,
             }
 
         batch_header = payload.get("batch_header", {})
@@ -189,6 +201,26 @@ class PayPalClient:
             "transaction_status": item.get("transaction_status"),
             "error_name": error.get("name"),
         }
+
+    def find_payout_batch(self, sender_batch_id: str) -> dict[str, Any] | None:
+        """Find a batch by sender_batch_id for reconciliation."""
+        local = self._get_record(sender_batch_id)
+        if local and local.get("paypal_batch_id"):
+            return {"payout_batch_id": local["paypal_batch_id"]}
+        if self._dry_run:
+            return {"payout_batch_id": f"DRY_RUN_{sender_batch_id}"}
+        try:
+            response = self._http.get(
+                f"{self._base_url}/v1/payments/payouts",
+                headers={"Authorization": f"Bearer {self.get_access_token()}"},
+                params={"sender_batch_id": sender_batch_id},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            batches = payload.get("items") or payload.get("batch_details") or []
+            return batches[0] if batches else None
+        except (httpx.HTTPError, ValueError, RuntimeError):
+            return None
 
     def wait_for_final_status(
         self, paypal_batch_id: str, timeout_s: float = 120
@@ -292,14 +324,17 @@ class PayPalClient:
             "SUCCESS": "success",
             "DENIED": "failed",
             "FAILED": "failed",
-        }.get(status, "pending")
+            "UNCLAIMED": "unclaimed",
+            "PENDING": "submitted",
+            "PROCESSING": "submitted",
+        }.get(status, "needs_reconcile")
 
     @staticmethod
-    def _error_name(error: Exception) -> str:
+    def _error_name(error: Exception) -> str | None:
         if isinstance(error, httpx.HTTPStatusError):
             try:
                 payload = error.response.json()
-                return payload.get("name") or f"HTTP_{error.response.status_code}"
+                return payload.get("name")
             except ValueError:
-                return f"HTTP_{error.response.status_code}"
-        return str(error) or error.__class__.__name__
+                return None
+        return None

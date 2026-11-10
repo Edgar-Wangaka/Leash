@@ -1,0 +1,28 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "leash-dashboard",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "leash.dashboard"
+      ],
+      "port": 8787
+    },
+    {
+      "name": "leash-dashboard-dry-run",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": [
+        "DRY_RUN=true",
+        "LEASH_DASHBOARD_PORT=8788",
+        "LEASH_DB_PATH=leash-dry-run.db",
+        "PAYOUTS_DB_PATH=payouts-dry-run.db",
+        ".venv/bin/python",
+        "-m",
+        "leash.dashboard"
+      ],
+      "port": 8788
+    }
+  ]
+}

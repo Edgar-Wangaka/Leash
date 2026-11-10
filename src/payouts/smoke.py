@@ -10,6 +10,9 @@ from .paypal_client import PayPalClient
 
 
 def main() -> int:
+    from leash import config
+
+    config.configure()  # load .env so the test works without exporting variables
     receiver_email = os.getenv("PAYPAL_RECEIVER_EMAIL")
     if not receiver_email:
         print("PAYPAL_RECEIVER_EMAIL must be set", file=sys.stderr)

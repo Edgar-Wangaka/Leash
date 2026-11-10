@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leash</title>
+<style>
+  /* A paper ledger, not a SaaS dashboard: ink on paper, ruled lines, rubber stamps.
+     PayPal navy carries the structure, PayPal gold marks what needs the human. */
+  :root {
+    --paper: #f4f0e6; --sheet: #fbf8f1; --ink: #18160f; --rule: #cdc5b3; --faint: #e6dfd0;
+    --muted: #6d6656; --navy: #003087; --blue: #0070ba; --gold: #ffc439; --paid: #1d6a3a; --held: #9a5b00; --blocked: #bf2a1c;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.45 var(--serif); }
+  main { max-width: 1120px; margin: 0 auto; padding: 28px 20px 72px; }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .label { font: 600 11px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+
+  /* Masthead */
+  header { display: flex; align-items: flex-end; gap: 20px; flex-wrap: wrap;
+    border-bottom: 3px double var(--navy); padding-bottom: 14px; }
+  h1 { margin: 0; font: italic 600 54px/0.9 var(--serif); letter-spacing: -0.03em; color: var(--navy); }
+  header p { margin: 0 0 4px; flex: 1 1 260px; font-style: italic; font-size: 18px; color: var(--muted); }
+  #mode { font: 700 11px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase;
+    padding: 7px 10px; border: 1.5px solid currentColor; margin-bottom: 4px; }
+  #mode.sandbox { color: var(--blue); } #mode.dry { color: var(--held); }
+  #mode.live, #mode.down { color: var(--paper); background: var(--blocked); border-color: var(--blocked); }
+
+  /* The rules */
+  .rules { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0 40px; padding: 22px 0 6px; }
+  .rule-block { padding-bottom: 18px; }
+  .rule-block h2 { margin: 0 0 10px; }
+  .scale { display: flex; height: 34px; border: 1.5px solid var(--navy); }
+  .scale div { display: flex; align-items: center; padding: 0 8px; overflow: hidden; white-space: nowrap;
+    font: 600 11px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .scale .auto { background: var(--sheet); color: var(--paid); }
+  .scale .ask { background: var(--gold); color: var(--navy); border-left: 1.5px solid var(--navy); }
+  .scale .no { color: var(--blocked); border-left: 1.5px solid var(--navy);
+    background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(191,42,28,.22) 6px 8px); }
+  .ticks { position: relative; height: 20px; font: 12px/20px var(--mono); color: var(--muted); }
+  .ticks span { position: absolute; transform: translateX(-50%); }
+  .ticks span:first-child { transform: none; }
+  .budget-bar { height: 34px; border: 1.5px solid var(--navy); background: var(--sheet); position: relative; }
+  .budget-bar i { position: absolute; inset: 0 auto 0 0; background: var(--navy); width: 0; transition: width .5s ease; }
+  .budget-line { display: flex; justify-content: space-between; gap: 12px; margin-top: 4px;
+    font: 12px/20px var(--mono); color: var(--muted); }
+  .budget-line b { color: var(--ink); font-weight: 600; }
+  .fineprint { grid-column: 1 / -1; border-top: 1px solid var(--rule); padding: 10px 0 0;
+    display: flex; gap: 8px 28px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+  .fineprint b { color: var(--ink); font: 500 13px var(--mono); }
+
+  h2.section { margin: 30px 0 0; padding-bottom: 8px; border-bottom: 1.5px solid var(--navy);
+    display: flex; justify-content: space-between; align-items: baseline; }
+  h2.section em { font: italic 400 14px var(--serif); letter-spacing: 0; text-transform: none; }
+
+  /* A held payment, drawn as a cheque waiting for a signature */
+  .slip { background: var(--sheet); border: 1.5px solid var(--navy); border-top: 0; padding: 18px 20px;
+    display: grid; grid-template-columns: auto 1fr auto; gap: 8px 28px; align-items: center;
+    box-shadow: 5px 5px 0 var(--gold); margin: 0 5px 14px 0; animation: drop .35s ease; }
+  .slip .sum { font: 600 44px/1 var(--mono); letter-spacing: -0.04em; }
+  .slip .to { font: 500 15px var(--mono); overflow-wrap: anywhere; }
+  .slip .memo { font-style: italic; overflow-wrap: anywhere; }
+  .slip .memo::before { content: "\201C"; } .slip .memo::after { content: "\201D"; }
+  .slip .because { font-size: 14px; color: var(--muted); margin-top: 4px; }
+  .slip .actions { display: flex; gap: 10px; }
+  button { font: 700 12px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; cursor: pointer;
+    padding: 13px 18px; border: 1.5px solid var(--ink); background: transparent; color: var(--ink); border-radius: 0; }
+  button.sign { background: var(--gold); color: var(--navy); border-color: var(--navy); }
+  button.sign:hover { background: var(--navy); color: var(--gold); }
+  button.refuse:hover { background: var(--blocked); border-color: var(--blocked); color: var(--paper); }
+  button:disabled { opacity: .4; cursor: default; }
+  button:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+  .none { padding: 16px 0; font-style: italic; color: var(--muted); border-bottom: 1px solid var(--rule); }
+
+  /* The ledger */
+  .ledger { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 860px; }
+  th { text-align: left; padding: 10px 12px 8px 0; border-bottom: 1px solid var(--ink); }
+  td { padding: 14px 12px 14px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th.r, td.r { text-align: right; }
+  td.when { font: 13px/1.6 var(--mono); color: var(--muted); white-space: nowrap; }
+  td.who { font: 13px/1.6 var(--mono); }
+  td.to div:first-child { font: 500 14px/1.5 var(--mono); white-space: nowrap; }
+  td.to .memo { font-style: italic; color: var(--muted); overflow-wrap: anywhere; }
+  td.sum { font: 600 19px/1.2 var(--mono); white-space: nowrap; }
+  tr.is-blocked td.sum { color: var(--blocked); text-decoration: line-through; text-decoration-thickness: 1.5px; }
+  td.why { font-size: 14px; color: var(--muted); min-width: 220px; max-width: 300px; overflow-wrap: anywhere; }
+  td .ref { font: 11px/1.5 var(--mono); color: var(--blue); max-width: 190px; overflow-wrap: anywhere; margin-top: 4px; }
+  tr.fresh td { animation: ink 1.6s ease; }
+  .stamp { display: inline-block; font: 700 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
+    padding: 5px 7px; border: 2px solid currentColor; outline: 1px solid currentColor; outline-offset: 2px;
+    transform: rotate(-3deg); margin: 3px 4px; white-space: nowrap; }
+  .stamp.paid { color: var(--paid); } .stamp.held { color: var(--held); transform: rotate(2deg); }
+  .stamp.blocked { color: var(--blocked); }
+
+  .bench { margin-top: 34px; padding-top: 12px; border-top: 1px dashed var(--muted);
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .bench button { padding: 9px 12px; border-color: var(--muted); color: var(--muted); font-weight: 600; }
+  .bench button:hover { border-color: var(--ink); color: var(--ink); }
+  .bench span { font-size: 14px; font-style: italic; color: var(--muted); flex: 1 1 240px; }
+  #error { color: var(--blocked); font: 13px var(--mono); min-height: 20px; margin-top: 10px; }
+
+  @keyframes ink { from { background: var(--gold); } to { background: transparent; } }
+  @keyframes drop { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+  @media (max-width: 760px) {
+    h1 { font-size: 42px; }
+    .rules { grid-template-columns: 1fr; }
+    .slip { grid-template-columns: 1fr; }
+    .slip .sum { font-size: 36px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Leash</h1>
+    <p>The agent can ask. Only the rules, and you, can pay.</p>
+    <span id="mode" class="down">connecting</span>
+  </header>
+
+  <section class="rules" aria-label="Rules">
+    <div class="rule-block">
+      <h2 class="label">One payment</h2>
+      <div class="scale" id="scale">
+        <div class="auto">pays on its own</div><div class="ask">waits for you</div><div class="no">blocked</div>
+      </div>
+      <div class="ticks" id="ticks"></div>
+    </div>
+    <div class="rule-block">
+      <h2 class="label">Last 24 hours</h2>
+      <div class="budget-bar"><i id="meter"></i></div>
+      <div class="budget-line"><span><b id="spend">$0.00</b> spent</span><span id="left"></span></div>
+    </div>
+    <div class="fineprint">
+      <span>Pays only <span id="sellers"></span></span>
+      <span>At most <b id="rate"></b> requests a minute</span>
+    </div>
+  </section>
+
+  <h2 class="label section">Waiting for your signature <em id="holdcount"></em></h2>
+  <div id="holds"></div>
+
+  <h2 class="label section">Ledger <em>every request an agent has made, newest first</em></h2>
+  <div class="ledger">
+    <table>
+      <thead><tr>
+        <th class="label">Time</th><th class="label">Agent</th><th class="label">Pay to</th>
+        <th class="label r">Amount</th><th class="label">Outcome</th><th class="label">Why</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="bench">
+    <button data-scenario="small">$8 basket</button>
+    <button data-scenario="large">$55 hamper</button>
+    <button data-scenario="attack">Hijacked: $500 to attacker</button>
+    <span>Test bench. Fixed requests through the same gate; no model involved.</span>
+  </div>
+  <div id="error"></div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const el = (tag, cls, text) => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;  // textContent: request text is untrusted
+    return node;
+  };
+  const money = (value) => "$" + Number(value).toFixed(2);
+  const seen = new Set();
+  let firstRender = true, lastState = "";
+
+  function outcome(d) {
+    if (d.verdict === "block") return ["Blocked", "blocked"];
+    if (d.status === "paid") return [d.approved_by ? "Paid · you signed" : "Paid", "paid"];
+    if (d.status === "submitted") return ["Sent to PayPal", "paid"];
+    if (d.status === "pending") return ["Awaiting you", "held"];
+    if (d.status === "denied") return ["Refused by you", "blocked"];
+    if (d.status === "expired") return ["Expired", "blocked"];
+    if (d.status === "rejected_on_recheck") return ["Rejected at signing", "blocked"];
+    if (d.status === "failed") return ["PayPal declined", "blocked"];
+    if (d.status === "needs_reconcile") return ["Checking PayPal", "held"];
+    return [d.status, "held"];
+  }
+
+  async function post(path, body) {
+    const response = await fetch(path, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const result = await response.json();
+    $("error").textContent = result.ok === false ? "Not done: " + (result.reason || result.status) : "";
+    await refresh();
+  }
+
+  function renderRules(state) {
+    const modes = { "dry-run": ["Dry run · no money moves", "dry"],
+      "sandbox": ["PayPal sandbox", "sandbox"], "live": ["Live PayPal", "live"] };
+    const [modeText, modeClass] = modes[state.mode] || [state.mode, "down"];
+    $("mode").textContent = modeText; $("mode").className = modeClass;
+
+    const p = state.policy, cap = Number(p.per_transaction_cap_usd), ask = Number(p.approval_threshold_usd);
+    const total = cap * 1.3, parts = $("scale").children;
+    parts[0].style.width = ask / total * 100 + "%";
+    parts[1].style.width = (cap - ask) / total * 100 + "%";
+    parts[2].style.flex = "1";
+    const ticks = $("ticks"); ticks.replaceChildren(el("span", "", "$0"));
+    for (const value of [ask, cap]) {
+      const tick = el("span", "", money(value).replace(".00", ""));
+      tick.style.left = value / total * 100 + "%"; ticks.append(tick);
+    }
+
+    const spent = Number(state.daily_spend_usd), budget = Number(p.daily_budget_usd);
+    $("spend").textContent = money(spent);
+    $("left").textContent = money(Math.max(0, budget - spent)) + " left of " + money(budget);
+    $("meter").style.width = Math.min(100, spent / budget * 100) + "%";
+    const sellers = $("sellers"); sellers.replaceChildren();
+    p.merchant_allowlist.forEach((email, index) => {
+      if (index) sellers.append(" and ");
+      sellers.append(el("b", "", email));
+    });
+    $("rate").textContent = p.max_requests_per_minute;
+  }
+
+  function renderHolds(holds) {
+    const box = $("holds"); box.replaceChildren();
+    $("holdcount").textContent = holds.length ? holds.length + " waiting" : "";
+    document.title = (holds.length ? "(" + holds.length + ") " : "") + "Leash";
+    if (!holds.length) box.append(el("div", "none", "Nothing is waiting on you."));
+    for (const d of holds) {
+      const slip = el("div", "slip");
+      const body = el("div");
+      body.append(el("div", "label", "Pay to"), el("div", "to", d.merchant_email),
+        el("div", "memo", d.reason), el("div", "because", "Asked by " + d.agent_id + ". " + d.explanation));
+      const actions = el("div", "actions");
+      const sign = el("button", "sign", "Approve"), refuse = el("button", "refuse", "Deny");
+      const act = (path) => { sign.disabled = refuse.disabled = true; post(path, { request_id: d.request_id }); };
+      sign.onclick = () => act("/api/approve"); refuse.onclick = () => act("/api/deny");
+      actions.append(sign, refuse);
+      slip.append(el("div", "sum", money(d.amount_usd)), body, actions);
+      box.append(slip);
+    }
+  }
+
+  function renderLedger(decisions) {
+    const rows = $("rows"); rows.replaceChildren();
+    if (!decisions.length) {
+      const row = el("tr"), cell = el("td", "why", "No requests yet. The page updates on its own.");
+      cell.colSpan = 6; row.append(cell); rows.append(row);
+    }
+    for (const d of decisions) {
+      const [text, cls] = outcome(d);
+      const row = el("tr", "is-" + cls + (!firstRender && !seen.has(d.request_id) ? " fresh" : ""));
+      seen.add(d.request_id);
+      const to = el("td", "to"); to.append(el("div", "", d.merchant_email), el("div", "memo", d.reason));
+      const result = el("td"); result.append(el("span", "stamp " + cls, text));
+      if (d.paypal_batch_id) result.append(el("div", "ref", "PayPal batch " + d.paypal_batch_id));
+      if (d.error_name) result.append(el("div", "ref", d.error_name));
+      row.append(el("td", "when", new Date(d.created_at).toLocaleTimeString()), el("td", "who", d.agent_id),
+        to, el("td", "sum r", money(d.amount_usd)), result, el("td", "why", d.explanation));
+      rows.append(row);
+    }
+    firstRender = false;
+  }
+
+  async function refresh() {
+    try {
+      // Redraw only when something changed, so a button is never replaced mid-click.
+      const text = await (await fetch("/api/state")).text();
+      if (text === lastState) return;
+      lastState = text;
+      const state = JSON.parse(text);
+      renderRules(state);
+      renderHolds(state.decisions.filter((d) => d.verdict === "hold_for_human" && d.status === "pending"));
+      renderLedger(state.decisions);
+    } catch (error) {
+      lastState = ""; $("mode").textContent = "Server not reachable"; $("mode").className = "down";
+    }
+  }
+  for (const button of document.querySelectorAll("[data-scenario]")) {
+    button.onclick = () => post("/api/simulate", { scenario: button.dataset.scenario });
+  }
+  refresh(); setInterval(refresh, 1500);
+</script>
+</body>
+</html>
