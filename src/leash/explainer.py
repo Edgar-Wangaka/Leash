@@ -26,6 +26,7 @@ def explain(decision: dict[str, Any]) -> str:
         )
     if verdict == "block":
         labels = {
+            "invalid_amount": "the amount is not a valid positive number",
             "cap": f"the amount exceeds the ${policy.get('per_transaction_cap_usd')} transaction cap",
             "daily_budget": "the daily budget would be exceeded",
             "allowlist": "the merchant is not allowlisted",

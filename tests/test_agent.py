@@ -610,3 +610,58 @@ def test_pending_reconcile_keeps_batch_id_and_later_becomes_paid(tmp_path):
     assert payout.asked == ["batch-slow", "batch-slow"]
     assert record["payout"]["paypal_batch_id"] == "batch-slow"
     assert len(payout.calls) == 1
+
+
+import pytest
+
+
+@pytest.mark.parametrize("amount", ["-200", "0", "0.001", "NaN", "Infinity", "abc", ""])
+def test_unpayable_amount_is_blocked_and_never_counts_as_spend(tmp_path, amount):
+    payout = FakePayout()
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        payout_client=payout,
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        result = gate.process(
+            PaymentRequest("bad", "agent-1", ALLOWLISTED, amount, "x", "demo-legitimate-task")
+        )
+        spend = gate.daily_spend_usd()
+        approved = gate.approve("bad", "human-reviewer")
+
+    assert result["verdict"] == "block"
+    assert result["reasons"] == ["invalid_amount"]
+    assert result["status"] == "blocked"
+    assert "not a valid positive number" in result["explanation"]
+    assert spend == 0
+    assert approved["ok"] is False
+    assert payout.calls == []
+
+
+def test_negative_request_cannot_free_up_budget(tmp_path):
+    payout = FakePayout()
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        policy_path=_policy(tmp_path, daily_budget_usd=9),
+        payout_client=payout,
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        gate.process(allowed_request(key="first", amount=8))
+        gate.process(
+            PaymentRequest("neg", "agent-1", ALLOWLISTED, "-8", "x", "demo-legitimate-task")
+        )
+        second = gate.process(allowed_request(key="second", amount=8))
+
+    assert second["reasons"] == ["daily_budget"]
+    assert len(payout.calls) == 1
+
+
+def test_fractional_cents_round_half_up(tmp_path):
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        payout_client=FakePayout(),
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        result = gate.process(allowed_request(key="half", amount="8.005"))
+
+    assert result["amount_cents"] == 801

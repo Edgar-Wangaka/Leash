@@ -14,7 +14,7 @@ from typing import Any, Callable
 from payouts.paypal_client import PayPalClient
 
 from .explainer import explain, llm_risk_signal
-from .policy import Decision, PaymentRequest, evaluate, load_policy
+from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
 
 logger = logging.getLogger(__name__)
 
@@ -492,7 +492,8 @@ class PaymentGate:
         decision: Decision,
         status: str,
     ) -> None:
-        amount_cents = int((Decimal(str(request.amount_usd)) * 100).quantize(Decimal("1")))
+        # An unpayable amount is stored as 0 cents; its request is always blocked.
+        amount_cents = amount_to_cents(request.amount_usd) or 0
         expires_at = None
         if decision.verdict == "hold_for_human":
             hours = float(self.policy.get("human_approval_expiry_hours", 24))

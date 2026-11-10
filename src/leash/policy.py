@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
 
 DEFAULT_POLICY_PATH = Path(__file__).parents[2] / "config" / "policy.json"
 RULE_NAMES = (
+    "invalid_amount",
     "cap",
     "daily_budget",
     "allowlist",
@@ -37,6 +38,23 @@ class Decision:
     reasons: list[str]
 
 
+def amount_to_cents(amount_usd: Decimal | str | float) -> int | None:
+    """Return the amount in whole cents, or None if it is not payable.
+
+    Zero, negative, non-numeric and non-finite amounts are not payable. A
+    negative amount in particular must never be recorded, because it would
+    lower the spending counted against the daily budget.
+    """
+    try:
+        amount = Decimal(str(amount_usd))
+        if not amount.is_finite():
+            return None
+        cents = int(amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) * 100)
+    except (InvalidOperation, ValueError):
+        return None
+    return cents if cents >= 1 else None
+
+
 def load_policy(path: str | Path | None = None) -> dict[str, Any]:
     """Load a policy JSON object without modifying it."""
     policy_path = Path(path) if path else DEFAULT_POLICY_PATH
@@ -47,7 +65,11 @@ def load_policy(path: str | Path | None = None) -> dict[str, Any]:
 def evaluate(request: PaymentRequest, state: Mapping[str, Any]) -> Decision:
     """Evaluate every deterministic rule and return all rules that fired."""
     policy = state["policy"]
-    amount = Decimal(str(request.amount_usd))
+    cents = amount_to_cents(request.amount_usd)
+    if cents is None:
+        # Nothing else can be judged without a real amount, and nothing is paid.
+        return Decision(verdict="block", reasons=["invalid_amount"])
+    amount = Decimal(cents) / Decimal(100)
     reasons: list[str] = []
 
     if amount > Decimal(str(policy["per_transaction_cap_usd"])):
@@ -76,6 +98,7 @@ def evaluate(request: PaymentRequest, state: Mapping[str, Any]) -> Decision:
         reasons.append("unrequested_task")
 
     blocking_rules = {
+        "invalid_amount",
         "cap",
         "daily_budget",
         "allowlist",
