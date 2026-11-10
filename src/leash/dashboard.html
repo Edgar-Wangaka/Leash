@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Leash</title>
 <style>
-  /* A paper ledger, not a SaaS dashboard: ink on paper, ruled lines, rubber stamps.
+  /* A paper ledger: ink on paper, ruled lines, rubber stamps.
      PayPal navy carries the structure, PayPal gold marks what needs the human. */
   :root {
     --paper: #f4f0e6; --sheet: #fbf8f1; --ink: #18160f; --rule: #cdc5b3; --faint: #e6dfd0;
@@ -85,6 +85,8 @@
   td.who { font: 13px/1.6 var(--mono); }
   td.to div:first-child { font: 500 14px/1.5 var(--mono); white-space: nowrap; }
   td.to .memo { font-style: italic; color: var(--muted); overflow-wrap: anywhere; }
+  .catalog { font: 12px/1.6 var(--mono); color: var(--blue); overflow-wrap: anywhere; max-width: 420px; }
+  .catalog.bad { color: var(--blocked); }
   td.sum { font: 600 19px/1.2 var(--mono); white-space: nowrap; }
   tr.is-blocked td.sum { color: var(--blocked); text-decoration: line-through; text-decoration-thickness: 1.5px; }
   td.why { font-size: 14px; color: var(--muted); min-width: 220px; max-width: 300px; overflow-wrap: anywhere; }
@@ -118,33 +120,33 @@
 <main>
   <header>
     <h1>Leash</h1>
-    <p>The agent can ask. Only the rules, and you, can pay.</p>
-    <span id="mode" class="down">connecting</span>
+    <p>Spending limits and human approval between an AI agent and PayPal.</p>
+    <span id="mode" class="down">Connecting</span>
   </header>
 
   <section class="rules" aria-label="Rules">
     <div class="rule-block">
-      <h2 class="label">One payment</h2>
+      <h2 class="label">Per payment</h2>
       <div class="scale" id="scale">
-        <div class="auto">pays on its own</div><div class="ask">waits for you</div><div class="no">blocked</div>
+        <div class="auto">paid automatically</div><div class="ask">needs your approval</div><div class="no">blocked</div>
       </div>
       <div class="ticks" id="ticks"></div>
     </div>
     <div class="rule-block">
-      <h2 class="label">Last 24 hours</h2>
+      <h2 class="label">Spent in the last 24 hours</h2>
       <div class="budget-bar"><i id="meter"></i></div>
-      <div class="budget-line"><span><b id="spend">$0.00</b> spent</span><span id="left"></span></div>
+      <div class="budget-line"><span><b id="spend">$0.00</b></span><span id="left"></span></div>
     </div>
     <div class="fineprint">
-      <span>Pays only <span id="sellers"></span></span>
-      <span>At most <b id="rate"></b> requests a minute</span>
+      <span>Approved sellers: <span id="sellers"></span></span>
+      <span>Limit of <b id="rate"></b> requests a minute</span>
     </div>
   </section>
 
-  <h2 class="label section">Waiting for your signature <em id="holdcount"></em></h2>
+  <h2 class="label section">Waiting for your approval <em id="holdcount"></em></h2>
   <div id="holds"></div>
 
-  <h2 class="label section">Ledger <em>every request an agent has made, newest first</em></h2>
+  <h2 class="label section">Payment requests <em>newest first</em></h2>
   <div class="ledger">
     <table>
       <thead><tr>
@@ -156,10 +158,10 @@
   </div>
 
   <div class="bench">
-    <button data-scenario="small">$8 basket</button>
-    <button data-scenario="large">$55 hamper</button>
-    <button data-scenario="attack">Hijacked: $500 to attacker</button>
-    <span>Test bench. Fixed requests through the same gate; no model involved.</span>
+    <button data-scenario="small">Send an $8 request</button>
+    <button data-scenario="large">Send a $55 request</button>
+    <button data-scenario="attack">Send a hijacked $500 request</button>
+    <span>Test requests. These buttons send fixed requests through the same rules. No AI model is involved.</span>
   </div>
   <div id="error"></div>
 </main>
@@ -175,30 +177,52 @@
   const seen = new Set();
   let firstRender = true, lastState = "";
 
+  // What the Channel3 catalog says about the product the agent named.
+  function catalogLine(d) {
+    const c = d.catalog;
+    if (!c) return null;
+    if (c.status !== "ok") return el("div", "catalog bad", "Channel3 could not confirm the price");
+    const over = d.reasons.includes("price_mismatch");
+    return el("div", "catalog" + (over ? " bad" : ""),
+      "Channel3 lists it at " + money(c.price_usd) + " from " + c.sold_by);
+  }
+
   function outcome(d) {
     if (d.verdict === "block") return ["Blocked", "blocked"];
-    if (d.status === "paid") return [d.approved_by ? "Paid · you signed" : "Paid", "paid"];
+    if (d.status === "paid") return [d.approved_by ? "Paid, you approved" : "Paid", "paid"];
     if (d.status === "submitted") return ["Sent to PayPal", "paid"];
-    if (d.status === "pending") return ["Awaiting you", "held"];
-    if (d.status === "denied") return ["Refused by you", "blocked"];
-    if (d.status === "expired") return ["Expired", "blocked"];
-    if (d.status === "rejected_on_recheck") return ["Rejected at signing", "blocked"];
-    if (d.status === "failed") return ["PayPal declined", "blocked"];
-    if (d.status === "needs_reconcile") return ["Checking PayPal", "held"];
+    if (d.status === "pending") return ["Needs approval", "held"];
+    if (d.status === "denied") return ["Denied by you", "blocked"];
+    if (d.status === "expired") return ["Approval expired", "blocked"];
+    if (d.status === "rejected_on_recheck") return ["Over limit at approval", "blocked"];
+    if (d.status === "failed") return ["Declined by PayPal", "blocked"];
+    if (d.status === "needs_reconcile") return ["Checking with PayPal", "held"];
     return [d.status, "held"];
   }
 
+  // The server prints a link with #token=... ; keep the token for this tab only
+  // and take it out of the address bar.
+  const token = (() => {
+    const match = location.hash.match(/token=([A-Za-z0-9_-]+)/);
+    try {
+      if (match) sessionStorage.setItem("leashToken", match[1]);
+      return match ? match[1] : sessionStorage.getItem("leashToken") || "";
+    } catch (error) { return match ? match[1] : ""; }
+  })();
+  if (location.hash) history.replaceState(null, "", location.pathname);
+
   async function post(path, body) {
     const response = await fetch(path, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      method: "POST", headers: { "Content-Type": "application/json", "X-Leash-Token": token },
+      body: JSON.stringify(body),
     });
     const result = await response.json();
-    $("error").textContent = result.ok === false ? "Not done: " + (result.reason || result.status) : "";
+    $("error").textContent = result.ok === false ? "That did not go through (" + (result.reason || result.status).replaceAll("_", " ") + ")." : "";
     await refresh();
   }
 
   function renderRules(state) {
-    const modes = { "dry-run": ["Dry run · no money moves", "dry"],
+    const modes = { "dry-run": ["Dry run: no money moves", "dry"],
       "sandbox": ["PayPal sandbox", "sandbox"], "live": ["Live PayPal", "live"] };
     const [modeText, modeClass] = modes[state.mode] || [state.mode, "down"];
     $("mode").textContent = modeText; $("mode").className = modeClass;
@@ -216,11 +240,11 @@
 
     const spent = Number(state.daily_spend_usd), budget = Number(p.daily_budget_usd);
     $("spend").textContent = money(spent);
-    $("left").textContent = money(Math.max(0, budget - spent)) + " left of " + money(budget);
+    $("left").textContent = money(Math.max(0, budget - spent)) + " left of the " + money(budget) + " daily budget";
     $("meter").style.width = Math.min(100, spent / budget * 100) + "%";
     const sellers = $("sellers"); sellers.replaceChildren();
     p.merchant_allowlist.forEach((email, index) => {
-      if (index) sellers.append(" and ");
+      if (index) sellers.append(", ");
       sellers.append(el("b", "", email));
     });
     $("rate").textContent = p.max_requests_per_minute;
@@ -230,12 +254,13 @@
     const box = $("holds"); box.replaceChildren();
     $("holdcount").textContent = holds.length ? holds.length + " waiting" : "";
     document.title = (holds.length ? "(" + holds.length + ") " : "") + "Leash";
-    if (!holds.length) box.append(el("div", "none", "Nothing is waiting on you."));
+    if (!holds.length) box.append(el("div", "none", "No payments are waiting for approval."));
     for (const d of holds) {
       const slip = el("div", "slip");
       const body = el("div");
-      body.append(el("div", "label", "Pay to"), el("div", "to", d.merchant_email),
-        el("div", "memo", d.reason), el("div", "because", "Asked by " + d.agent_id + ". " + d.explanation));
+      body.append(el("div", "label", "Pay to"), el("div", "to", d.merchant_email), el("div", "memo", d.reason));
+      const product = catalogLine(d); if (product) body.append(product);
+      body.append(el("div", "because", "Requested by " + d.agent_id + ". " + d.explanation));
       const actions = el("div", "actions");
       const sign = el("button", "sign", "Approve"), refuse = el("button", "refuse", "Deny");
       const act = (path) => { sign.disabled = refuse.disabled = true; post(path, { request_id: d.request_id }); };
@@ -249,7 +274,7 @@
   function renderLedger(decisions) {
     const rows = $("rows"); rows.replaceChildren();
     if (!decisions.length) {
-      const row = el("tr"), cell = el("td", "why", "No requests yet. The page updates on its own.");
+      const row = el("tr"), cell = el("td", "why", "No requests yet. New ones appear here automatically.");
       cell.colSpan = 6; row.append(cell); rows.append(row);
     }
     for (const d of decisions) {
@@ -257,6 +282,7 @@
       const row = el("tr", "is-" + cls + (!firstRender && !seen.has(d.request_id) ? " fresh" : ""));
       seen.add(d.request_id);
       const to = el("td", "to"); to.append(el("div", "", d.merchant_email), el("div", "memo", d.reason));
+      const product = catalogLine(d); if (product) to.append(product);
       const result = el("td"); result.append(el("span", "stamp " + cls, text));
       if (d.paypal_batch_id) result.append(el("div", "ref", "PayPal batch " + d.paypal_batch_id));
       if (d.error_name) result.append(el("div", "ref", d.error_name));
@@ -270,7 +296,12 @@
   async function refresh() {
     try {
       // Redraw only when something changed, so a button is never replaced mid-click.
-      const text = await (await fetch("/api/state")).text();
+      const response = await fetch("/api/state", { headers: { "X-Leash-Token": token } });
+      if (response.status === 401) {
+        $("mode").textContent = "Open the dashboard with the link printed in the terminal"; $("mode").className = "down";
+        lastState = ""; return;
+      }
+      const text = await response.text();
       if (text === lastState) return;
       lastState = text;
       const state = JSON.parse(text);
@@ -278,7 +309,7 @@
       renderHolds(state.decisions.filter((d) => d.verdict === "hold_for_human" && d.status === "pending"));
       renderLedger(state.decisions);
     } catch (error) {
-      lastState = ""; $("mode").textContent = "Server not reachable"; $("mode").className = "down";
+      lastState = ""; $("mode").textContent = "Dashboard server is not running"; $("mode").className = "down";
     }
   }
   for (const button of document.querySelectorAll("[data-scenario]")) {

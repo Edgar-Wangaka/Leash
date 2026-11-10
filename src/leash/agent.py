@@ -12,6 +12,11 @@ from typing import Any, Callable
 
 import httpx
 
+from .catalog import (
+    CHANNEL3_SEARCH_URL,
+    normalize_channel3_product,
+    sandbox_seller_for,
+)
 from .gate import PaymentGate
 from .policy import PaymentRequest, load_policy
 
@@ -19,45 +24,8 @@ from .policy import PaymentRequest, load_policy
 CONFIG_DIR = Path(__file__).parents[2] / "config"
 DEFAULT_CATALOG_PATH = CONFIG_DIR / "mock_catalog.json"
 DEFAULT_PLANTED_PATH = CONFIG_DIR / "planted_listings.json"
-CHANNEL3_SEARCH_URL = "https://api.trychannel3.com/v1/search"
 
 logger = logging.getLogger(__name__)
-
-
-def sandbox_seller_for(domain: str, allowlist: list[str]) -> str:
-    """Pick the PayPal sandbox account that stands in for a real retailer.
-
-    Real retailers have no PayPal sandbox account, so each retailer domain is
-    mapped, always the same way, onto one of the approved sandbox sellers.
-    """
-    digest = hashlib.sha256(domain.lower().encode()).digest()
-    return allowlist[digest[0] % len(allowlist)]
-
-
-def normalize_channel3_product(
-    product: dict[str, Any], allowlist: list[str]
-) -> dict[str, Any] | None:
-    """Reduce a Channel3 product to the cheapest in-stock offer, or None."""
-    offers = [
-        offer
-        for offer in product.get("offers") or []
-        if offer.get("availability", "InStock") == "InStock"
-        and isinstance((offer.get("price") or {}).get("price"), (int, float))
-    ]
-    if not offers:
-        return None
-    offer = min(offers, key=lambda item: item["price"]["price"])
-    brands = product.get("brands") or []
-    description = (product.get("description") or "").strip()
-    return {
-        "name": product.get("title", ""),
-        "description": description[:400],
-        "brand": brands[0].get("name") if brands else None,
-        "sold_by": offer.get("domain", ""),
-        "merchant_email": sandbox_seller_for(offer.get("domain", ""), allowlist),
-        "amount_usd": f"{offer['price']['price']:.2f}",
-        "channel3_product_id": product.get("id"),
-    }
 
 
 class ProductSearcher:
@@ -204,6 +172,7 @@ class ShoppingAgent:
             amount_usd=product["amount_usd"],
             reason=f"{task_text}: {product.get('name', 'product')}",
             source_task_id=task_id,
+            product_id=product.get("channel3_product_id") or None,
         )
         return self.gate.process(request, task_text=task_text)
 
@@ -261,6 +230,7 @@ class ShoppingAgent:
                                         "merchant_email": {"type": "string"},
                                         "amount_usd": {"type": "number"},
                                         "reason": {"type": "string"},
+                                        "product_id": {"type": "string"},
                                     },
                                 },
                             },
@@ -278,6 +248,7 @@ class ShoppingAgent:
                     "merchant_email": arguments["merchant_email"],
                     "amount_usd": arguments["amount_usd"],
                     "name": arguments.get("reason", "selected product"),
+                    "channel3_product_id": arguments.get("product_id"),
                 }
                 return self.request_payment(
                     task_text=task_text,

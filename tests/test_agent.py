@@ -665,3 +665,78 @@ def test_fractional_cents_round_half_up(tmp_path):
         result = gate.process(allowed_request(key="half", amount="8.005"))
 
     assert result["amount_cents"] == 801
+
+
+def test_late_approved_hold_counts_against_the_budget_from_approval(tmp_path):
+    # A hold approved 23 hours after it was made must keep counting for a full
+    # day after the approval, not drop out an hour later.
+    current = [datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)]
+    payout = FakePayout()
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        policy_path=_policy(tmp_path, daily_budget_usd=25),
+        payout_client=payout,
+        now=lambda: current[0],
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        gate.process(hold_request(key="late", amount=20))
+        current[0] += timedelta(hours=23)
+        assert gate.approve("late", "human-reviewer")["status"] == "paid"
+        current[0] += timedelta(hours=2)  # 25h after the request, 2h after paying
+        after = gate.process(allowed_request(key="next", amount=8))
+        assert gate.daily_spend_usd() == 20
+
+    assert after["reasons"] == ["daily_budget"]
+    assert len(payout.calls) == 1
+
+
+def test_unclaimed_payouts_count_against_the_budget(tmp_path):
+    class UnclaimedPayPal(FakePayout):
+        def send_payout(self, *args):
+            self.calls.append(args)
+            return {"status": "unclaimed", "paypal_batch_id": "batch-u"}
+
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        policy_path=_policy(tmp_path, daily_budget_usd=9),
+        payout_client=UnclaimedPayPal(),
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        assert gate.process(allowed_request(key="u1", amount=8))["status"] == "unclaimed"
+        second = gate.process(allowed_request(key="u2", amount=8))
+
+    assert second["reasons"] == ["daily_budget"]
+
+
+def test_agent_sends_the_product_id_so_the_price_is_checked(tmp_path):
+    looked_up = []
+
+    def lookup(product_id):
+        looked_up.append(product_id)
+        return {"status": "ok", "price_usd": "1.00", "sold_by": "x.example"}
+
+    searcher = ProductSearcher(
+        search_fn=lambda query: [
+            {
+                "name": "Gift",
+                "merchant_email": ALLOWLISTED,
+                "amount_usd": "8",
+                "channel3_product_id": "prod_9",
+            }
+        ],
+    )
+    payout = FakePayout()
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        policy_path=_policy(tmp_path),
+        payout_client=payout,
+        risk_signal=lambda request, task: ("none", "none"),
+        price_lookup=lookup,
+    ) as gate:
+        result = ShoppingAgent(gate, searcher=searcher).run(
+            "buy a gift", task_id="demo-legitimate-task"
+        )
+
+    assert looked_up == ["prod_9"]
+    assert result["reasons"] == ["price_mismatch"]
+    assert payout.calls == []

@@ -18,8 +18,6 @@ from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_po
 
 logger = logging.getLogger(__name__)
 
-RESERVED_STATUSES = {"pending", "paying", "submitted", "needs_reconcile", "paid"}
-FINAL_PAY_STATUSES = {"paid", "failed", "unclaimed"}
 IN_PROGRESS_STATUSES = {"PENDING", "PROCESSING", "NEW"}
 PAYPAL_STATUS_MAP = {
     "SUCCESS": "paid",
@@ -40,12 +38,15 @@ class PaymentGate:
         payout_client: Any | None = None,
         now: Callable[[], datetime] | None = None,
         risk_signal: Callable[[PaymentRequest, str], tuple[str, str]] | None = None,
+        price_lookup: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self.db_path = db_path
         self.policy = load_policy(policy_path)
         self.payout_client = payout_client or PayPalClient()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._risk_signal = risk_signal or llm_risk_signal
+        # Looks a product up in the catalog. None means no catalog is configured.
+        self._price_lookup = price_lookup
         self._initialize_database()
 
     def close(self) -> None:
@@ -61,7 +62,8 @@ class PaymentGate:
 
     def process(self, request: PaymentRequest, *, task_text: str = "") -> dict[str, Any]:
         """Evaluate, reserve, and pay an allow decision."""
-        decision, existing = self._reserve_decision(request)
+        catalog = self._check_catalog(request)
+        decision, existing = self._reserve_decision(request, catalog)
         if existing is not None:
             return existing
 
@@ -80,6 +82,16 @@ class PaymentGate:
             result = self._pay(record, request)
             return result["record"]
         return record
+
+    def _check_catalog(self, request: PaymentRequest) -> dict[str, Any] | None:
+        """Ask the catalog what the named product costs. Never raises."""
+        if not self._price_lookup or not request.product_id:
+            return None
+        try:
+            return self._price_lookup(request.product_id)
+        except Exception as error:
+            logger.warning("Catalog lookup failed: %s", error.__class__.__name__)
+            return {"status": "unavailable", "error": error.__class__.__name__}
 
     @staticmethod
     def _merge_risk_signal(
@@ -347,7 +359,7 @@ class PaymentGate:
         return self._result(mapped == "paid", mapped, error_name, request_id)
 
     def _reserve_decision(
-        self, request: PaymentRequest
+        self, request: PaymentRequest, catalog: dict[str, Any] | None = None
     ) -> tuple[Decision | None, dict[str, Any] | None]:
         with sqlite3.connect(self.db_path, timeout=30) as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -358,9 +370,12 @@ class PaymentGate:
             if existing:
                 connection.rollback()
                 return None, self._get_decision(request.request_id)
-            decision = evaluate(request, self._state(connection))
+            state = self._state(connection)
+            state["catalog"] = catalog
+            state["catalog_configured"] = self._price_lookup is not None
+            decision = evaluate(request, state)
             status = "blocked" if decision.verdict == "block" else "pending"
-            self._insert_decision(connection, request, decision, status)
+            self._insert_decision(connection, request, decision, status, catalog)
             connection.commit()
             return decision, None
 
@@ -378,23 +393,25 @@ class PaymentGate:
         day_ago = (now - timedelta(days=1)).isoformat()
         minute_ago = (now - timedelta(minutes=1)).isoformat()
         try:
-            # Money counts against the budget once it is committed: an allowed
-            # request from the moment it is reserved, a human hold from the
-            # moment an approval claims it.
+            # Money counts against the budget from the moment it is committed:
+            # an allowed request when it is reserved (created_at), a human hold
+            # when an approval claims it (approved_at). Windowing a hold on its
+            # creation time would let one approved late drop out of the budget
+            # early. Unclaimed payouts have left the account, so they count too.
             rows = connection.execute(
                 """
                 SELECT request_id, amount_cents, status
                 FROM decisions
-                WHERE created_at >= ?
-                  AND request_id IS NOT ?
+                WHERE request_id IS NOT ?
                   AND (
-                    (verdict = 'allow' AND status IN (
-                        'pending', 'paying', 'submitted', 'needs_reconcile', 'paid'))
-                    OR (verdict = 'hold_for_human' AND status IN (
-                        'paying', 'submitted', 'needs_reconcile', 'paid'))
+                    (verdict = 'allow' AND created_at >= ? AND status IN (
+                        'pending', 'paying', 'submitted', 'needs_reconcile',
+                        'paid', 'unclaimed'))
+                    OR (verdict = 'hold_for_human' AND approved_at >= ? AND status IN (
+                        'paying', 'submitted', 'needs_reconcile', 'paid', 'unclaimed'))
                   )
                 """,
-                (day_ago, exclude_request_id),
+                (exclude_request_id, day_ago, day_ago),
             ).fetchall()
             recent = connection.execute(
                 "SELECT COUNT(*) FROM decisions WHERE created_at >= ?",
@@ -491,6 +508,7 @@ class PaymentGate:
         request: PaymentRequest,
         decision: Decision,
         status: str,
+        catalog: dict[str, Any] | None = None,
     ) -> None:
         # An unpayable amount is stored as 0 cents; its request is always blocked.
         amount_cents = amount_to_cents(request.amount_usd) or 0
@@ -498,7 +516,10 @@ class PaymentGate:
         if decision.verdict == "hold_for_human":
             hours = float(self.policy.get("human_approval_expiry_hours", 24))
             expires_at = (self._now().astimezone(timezone.utc) + timedelta(hours=hours)).isoformat()
-        request_json = json.dumps({**asdict(request), "amount_usd": str(request.amount_usd)}, sort_keys=True)
+        request_json = json.dumps(
+            {**asdict(request), "amount_usd": str(request.amount_usd), "catalog": catalog},
+            sort_keys=True,
+        )
         connection.execute(
             """
             INSERT INTO decisions (
@@ -524,6 +545,7 @@ class PaymentGate:
                     "reasons": decision.reasons,
                     "amount_usd": str(request.amount_usd),
                     "policy_snapshot": self.policy,
+                    "catalog": catalog,
                 }),
                 expires_at,
                 self._now().astimezone(timezone.utc).isoformat(),
@@ -564,6 +586,7 @@ class PaymentGate:
             "reasons": decision.reasons,
             "amount_usd": record["amount_usd"],
             "policy_snapshot": self.policy,
+            "catalog": record["request"].get("catalog"),
         })
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(

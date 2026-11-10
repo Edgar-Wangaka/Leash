@@ -19,6 +19,9 @@ RULE_NAMES = (
     "velocity",
     "duplicate_request_id",
     "unrequested_task",
+    "price_mismatch",
+    "price_unverified",
+    "payee_mismatch",
 )
 
 
@@ -30,6 +33,7 @@ class PaymentRequest:
     amount_usd: Decimal | str | float
     reason: str
     source_task_id: str
+    product_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -97,8 +101,31 @@ def evaluate(request: PaymentRequest, state: Mapping[str, Any]) -> Decision:
     if request.source_task_id not in set(state.get("approved_task_ids", ())):
         reasons.append("unrequested_task")
 
+    # Catalog price check. The agent states a price; the catalog says what
+    # the product really costs. Paying more than the catalog price is blocked.
+    # A price that could not be checked is never paid without a human.
+    catalog = state.get("catalog")
+    if catalog and catalog.get("status") == "ok":
+        tolerance = Decimal(str(policy.get("price_tolerance_pct", 5))) / Decimal(100)
+        ceiling = Decimal(str(catalog["price_usd"])) * (Decimal(1) + tolerance)
+        if amount > ceiling:
+            reasons.append("price_mismatch")
+        # The money must go to the seller the catalog names for this product,
+        # not to some other approved seller the agent picked.
+        seller = catalog.get("merchant_email")
+        if seller and request.merchant_email.lower() != str(seller).lower():
+            reasons.append("payee_mismatch")
+    elif catalog:
+        reasons.append("price_unverified")
+    elif state.get("catalog_configured") and policy.get("require_catalog_product", True):
+        # With a catalog configured, a request that names no product could be
+        # for anything at any price, so it waits for a human by default.
+        reasons.append("price_unverified")
+
     blocking_rules = {
         "invalid_amount",
+        "price_mismatch",
+        "payee_mismatch",
         "cap",
         "daily_budget",
         "allowlist",
@@ -108,7 +135,7 @@ def evaluate(request: PaymentRequest, state: Mapping[str, Any]) -> Decision:
     }
     if any(reason in blocking_rules for reason in reasons):
         verdict = "block"
-    elif "approval_threshold" in reasons:
+    elif "approval_threshold" in reasons or "price_unverified" in reasons:
         verdict = "hold_for_human"
     else:
         verdict = "allow"

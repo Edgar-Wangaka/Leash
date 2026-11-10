@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import os
 import logging
+import os
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -12,53 +13,81 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _money(value: Any) -> str:
+    try:
+        return f"${Decimal(str(value)):.2f}"
+    except (InvalidOperation, ValueError):
+        return "this amount"
+
+
+def _join(parts: list[str]) -> str:
+    if len(parts) <= 1:
+        return "".join(parts)
+    return ", ".join(parts[:-1]) + " and " + parts[-1]
+
+
 def explain(decision: dict[str, Any]) -> str:
-    """Turn a stored decision into a short explanation for a human."""
+    """Say in plain words why a request was paid, held or blocked."""
     verdict = decision["verdict"]
     reasons = decision.get("reasons", [])
-    amount = decision.get("amount_usd", "the requested amount")
     policy = decision.get("policy_snapshot", {})
+    amount = _money(decision.get("amount_usd"))
+    threshold = _money(policy.get("approval_threshold_usd"))
+    catalog = decision.get("catalog") or {}
+    listed = (
+        f"Channel3 lists this product at {_money(catalog.get('price_usd'))} "
+        f"from {catalog.get('sold_by')}"
+        if catalog.get("status") == "ok"
+        else ""
+    )
+    price_note = f" {listed}." if listed and "price_mismatch" not in reasons else ""
 
     if verdict == "allow":
         return (
-            "Allowed because the amount is within policy, the merchant is allowlisted, "
-            "and the task is approved. No human approval is required."
+            f"No approval needed. {amount} is under the {threshold} approval threshold, "
+            f"the seller is approved, and the daily budget covers it.{price_note}"
         )
+
     if verdict == "block":
         labels = {
             "invalid_amount": "the amount is not a valid positive number",
-            "cap": f"the amount exceeds the ${policy.get('per_transaction_cap_usd')} transaction cap",
-            "daily_budget": "the daily budget would be exceeded",
-            "allowlist": "the merchant is not allowlisted",
-            "velocity": "too many requests arrived recently",
-            "duplicate_request_id": "this request ID was already seen",
-            "unrequested_task": "the source task was not approved",
+            "price_mismatch": f"{listed}, and this request asked for {amount}"
+            if listed
+            else "the amount is higher than the catalog price",
+            "cap": (
+                f"{amount} is over the "
+                f"{_money(policy.get('per_transaction_cap_usd'))} limit for one payment"
+            ),
+            "daily_budget": (
+                "it would take spending past the "
+                f"{_money(policy.get('daily_budget_usd'))} daily budget"
+            ),
+            "allowlist": "the seller is not on the approved list",
+            "payee_mismatch": (
+                f"the payment was addressed to a different seller than the one "
+                f"{catalog.get('sold_by') or 'the catalog'} lists for this product"
+            ),
+            "velocity": "too many requests arrived in the last minute",
+            "duplicate_request_id": "this request was already submitted",
+            "unrequested_task": "it is not part of an approved task",
         }
-        details = "; ".join(
-            labels.get(reason, reason)
+        details = [
+            labels.get(reason, reason.replace("_", " "))
             for reason in reasons
             if reason != "approval_threshold"  # irrelevant once a hard rule blocks
-        )
-        return f"Blocked because {details}. The payout client was not called."
+        ]
+        return f"Blocked because {_join(details)}. Nothing was sent to PayPal."
+
+    waiting = []
     if "approval_threshold" in reasons:
-        merchant = (
-            "the merchant is allowlisted"
-            if "allowlist" not in reasons
-            else "the merchant is not allowlisted"
-        )
-        task = (
-            "the task matches"
-            if "unrequested_task" not in reasons
-            else "the task is not approved"
-        )
-        return (
-            f"Held because ${amount} reaches the ${policy.get('approval_threshold_usd')} "
-            f"approval threshold; {merchant}; {task}. A human must approve it before payment."
-        )
-    return (
-        f"Held for human review because: {', '.join(reasons) or 'additional review is required'}. "
-        "No payment has been sent."
-    )
+        waiting.append(f"{amount} is at or above the {threshold} approval threshold")
+    if "price_unverified" in reasons:
+        waiting.append("Channel3 could not confirm the price of this product")
+    if "llm_suspicious" in reasons:
+        waiting.append("the AI risk check flagged the request")
+    if not waiting:
+        waiting.append("it needs a review")
+    return f"Waiting for your approval because {_join(waiting)}. Nothing has been paid.{price_note}"
 
 
 def llm_risk_signal(
