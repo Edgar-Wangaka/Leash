@@ -11,7 +11,25 @@ import os
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+def _find_project_root() -> Path:
+    """The folder holding config/. Works for a checkout and an installed package.
+
+    From a source checkout (or an editable install) it is two levels above this
+    file. A regular install puts this file in site-packages, so then the
+    current directory is used; hosts such as Render start the app from the
+    repository root. LEASH_PROJECT_ROOT overrides both.
+    """
+    configured = os.getenv("LEASH_PROJECT_ROOT", "").strip()
+    if configured:
+        return Path(configured).resolve()
+    source = Path(__file__).resolve().parents[2]
+    if (source / "config" / "policy.json").exists():
+        return source
+    return Path.cwd().resolve()
+
+
+PROJECT_ROOT = _find_project_root()
+CONFIG_DIR = PROJECT_ROOT / "config"
 
 
 def load_env(path: Path | None = None) -> None:

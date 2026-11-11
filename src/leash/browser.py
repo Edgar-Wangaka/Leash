@@ -24,9 +24,11 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .config import CONFIG_DIR
+
 logger = logging.getLogger(__name__)
 
-PLANTED_PATH = Path(__file__).parents[2] / "config" / "planted_listings.json"
+PLANTED_PATH = CONFIG_DIR / "planted_listings.json"
 DEMO_PREFIX = "/demo/listing/"
 HIDDEN_STYLE = re.compile(
     r"display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0"

@@ -18,6 +18,7 @@ from .catalog import (
     sandbox_seller_for,
 )
 from .browser import demo_path_for
+from .config import CONFIG_DIR
 from .gate import PaymentGate
 from .policy import PaymentRequest, load_policy
 
@@ -56,7 +57,6 @@ REQUEST_PAYMENT_TOOL = {
 }
 
 
-CONFIG_DIR = Path(__file__).parents[2] / "config"
 DEFAULT_CATALOG_PATH = CONFIG_DIR / "mock_catalog.json"
 DEFAULT_PLANTED_PATH = CONFIG_DIR / "planted_listings.json"
 

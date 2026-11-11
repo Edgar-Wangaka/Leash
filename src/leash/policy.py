@@ -8,8 +8,10 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
+from .config import CONFIG_DIR
 
-DEFAULT_POLICY_PATH = Path(__file__).parents[2] / "config" / "policy.json"
+
+DEFAULT_POLICY_PATH = CONFIG_DIR / "policy.json"
 RULE_NAMES = (
     "invalid_amount",
     "cap",

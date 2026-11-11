@@ -299,3 +299,27 @@ def test_agent_token_cannot_approve_through_the_front(front_client):
 def test_front_routes_mcp_to_the_bearer_guard(front_client):
     client, _ = front_client
     assert client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS).status_code == 401
+
+
+# --- config is found when installed into site-packages -------------------------
+
+def test_project_root_falls_back_to_cwd_when_installed(tmp_path, monkeypatch):
+    from leash import config
+
+    installed = tmp_path / "venv/lib/python3.11/site-packages/leash/config.py"
+    installed.parent.mkdir(parents=True)
+    installed.write_text("")
+    (tmp_path / "repo/config").mkdir(parents=True)
+    (tmp_path / "repo/config/policy.json").write_text("{}")
+    monkeypatch.delenv("LEASH_PROJECT_ROOT", raising=False)
+    monkeypatch.setattr(config, "__file__", str(installed))
+    monkeypatch.chdir(tmp_path / "repo")
+
+    assert config._find_project_root() == (tmp_path / "repo").resolve()
+
+
+def test_project_root_can_be_set_explicitly(tmp_path, monkeypatch):
+    from leash import config
+
+    monkeypatch.setenv("LEASH_PROJECT_ROOT", str(tmp_path))
+    assert config._find_project_root() == tmp_path.resolve()
