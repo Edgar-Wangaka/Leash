@@ -25,11 +25,17 @@ servers:
     description: Local dashboard (python -m leash.dashboard)
 tags:
   - name: health
+    description: Whether the service is up. No token needed.
   - name: decisions
+    description: The policy in force, today's spend and recent decisions.
   - name: approvals
+    description: The human approves or denies payments held for review.
   - name: settings
+    description: The human changes the spending limits, within fixed ranges.
   - name: testing
+    description: Scripted agent requests that go through the same rules.
   - name: demo
+    description: Fake product pages used by the prompt-injection demo.
 security:
   - dashboardToken: []
 

@@ -12,7 +12,9 @@ from typing import Any
 import httpx
 
 
-FINAL_STATUSES = {"SUCCESS", "DENIED", "FAILED"}
+# From PayPal's Payouts v1 schema (batch_enum and transaction_enum).
+NOT_PAID_STATUSES = {"DENIED", "FAILED", "CANCELED", "BLOCKED", "RETURNED", "REFUNDED", "REVERSED"}
+FINAL_STATUSES = {"SUCCESS"} | NOT_PAID_STATUSES
 FAILURE_NAMES = {"DENIED", "FAILED", "SELF_PAY_NOT_ALLOWED", "UNCLAIMED"}
 
 
@@ -233,22 +235,25 @@ class PayPalClient:
             transaction_status = status.get("transaction_status")
             error_name = status.get("error_name")
 
+            # The item's status decides when there is one: a SUCCESS batch can
+            # still hold an item that is ONHOLD or PENDING.
             if (
-                batch_status in FINAL_STATUSES
-                or transaction_status in FINAL_STATUSES
+                (transaction_status or batch_status) in FINAL_STATUSES
+                or batch_status in NOT_PAID_STATUSES
                 or error_name in FAILURE_NAMES
             ):
                 if batch_status == "SUCCESS" and transaction_status == "SUCCESS":
                     self._update_by_batch_id(paypal_batch_id, "success", None)
-                elif batch_status in {"DENIED", "FAILED"} or transaction_status in {
-                    "DENIED",
-                    "FAILED",
-                } or error_name in FAILURE_NAMES:
-                    self._update_by_batch_id(
-                        paypal_batch_id,
-                        "failed",
-                        error_name or batch_status or transaction_status,
+                elif (
+                    batch_status in NOT_PAID_STATUSES
+                    or transaction_status in NOT_PAID_STATUSES
+                    or error_name in FAILURE_NAMES
+                ):
+                    not_paid = next(
+                        (s for s in (transaction_status, batch_status) if s in NOT_PAID_STATUSES),
+                        None,
                     )
+                    self._update_by_batch_id(paypal_batch_id, "failed", error_name or not_paid)
                 return status
 
             if self._monotonic() >= deadline:
@@ -324,6 +329,7 @@ class PayPalClient:
             "SUCCESS": "success",
             "DENIED": "failed",
             "FAILED": "failed",
+            "CANCELED": "failed",
             "UNCLAIMED": "unclaimed",
             "PENDING": "submitted",
             "PROCESSING": "submitted",

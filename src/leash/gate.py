@@ -21,12 +21,20 @@ from .settings import LiveSettings, SettingsStore, store_from_env
 
 logger = logging.getLogger(__name__)
 
-IN_PROGRESS_STATUSES = {"PENDING", "PROCESSING", "NEW"}
+# Every batch_status and transaction_status in PayPal's Payouts v1 schema
+# (batch_enum, transaction_enum). ONHOLD means PayPal is still reviewing it.
+IN_PROGRESS_STATUSES = {"PENDING", "PROCESSING", "NEW", "ONHOLD"}
 PAYPAL_STATUS_MAP = {
     "SUCCESS": "paid",
     "DENIED": "failed",
     "FAILED": "failed",
     "UNCLAIMED": "unclaimed",
+    # The money did not reach the seller, or came back: none of it is spend.
+    "CANCELED": "failed",
+    "BLOCKED": "failed",
+    "RETURNED": "failed",
+    "REFUNDED": "failed",
+    "REVERSED": "failed",
 }
 
 
@@ -742,21 +750,17 @@ class PaymentGate:
             return self._result(False, mapped, None, request_id)
         transaction_status = str(status.get("transaction_status") or "").upper()
         batch_status = str(status.get("batch_status") or "").upper()
-        paypal_status = (
-            transaction_status
-            if transaction_status in PAYPAL_STATUS_MAP
-            else batch_status
-        )
-        mapped = PAYPAL_STATUS_MAP.get(str(paypal_status).upper(), "needs_reconcile")
-        if mapped == "needs_reconcile" and (
-            transaction_status in IN_PROGRESS_STATUSES
-            or batch_status in IN_PROGRESS_STATUSES
-        ):
+        # The item's own status decides. A batch is SUCCESS once PayPal has
+        # processed it, even while the one item in it is ONHOLD or UNCLAIMED.
+        paypal_status = transaction_status or batch_status
+        mapped = PAYPAL_STATUS_MAP.get(paypal_status, "needs_reconcile")
+        if mapped == "needs_reconcile" and paypal_status in IN_PROGRESS_STATUSES:
             mapped = "submitted"  # PayPal has it and is still working on it
-        self._set_status(request_id, mapped, status, status.get("error_name"))
-        return self._result(
-            mapped in {"paid", "submitted"}, mapped, status.get("error_name"), request_id
-        )
+        error_name = status.get("error_name")
+        if mapped == "failed" and not error_name:
+            error_name = paypal_status or None  # e.g. RETURNED, so the log says why
+        self._set_status(request_id, mapped, status, error_name)
+        return self._result(mapped in {"paid", "submitted"}, mapped, error_name, request_id)
 
     def _result(
         self, ok: bool, status: str, reason: str | None, request_id: str,

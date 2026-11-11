@@ -236,6 +236,27 @@ The scripted shopping agent and the LLM agent can take the same browser
 `browse_page` tool. Whatever a page says, the price and seller checks in the
 gate still decide.
 
+## PayPal context for the coding agent (APIMatic)
+
+Leash's PayPal code was checked in Claude Code with APIMatic's Context Plugin
+for PayPal, which gives the coding agent PayPal's SDK and API reference. The
+plugin covers the PayPal Server SDK (Orders, Payments, Vault, Subscriptions,
+Transaction Search). That SDK has no Payouts API, so Leash keeps its own small
+Payouts client (`src/payouts/paypal_client.py`), and its statuses were checked
+against PayPal's published Payouts schema. Every batch and item status in that
+schema now has a defined outcome (`tests/test_paypal_statuses.py`).
+
+To install the plugin:
+
+```bash
+npx context-plugins install https://github.com/paypaldev/server-sdk-context-plugin-preview
+```
+
+The preview's manifest has a `displayName` field that Claude Code currently
+rejects. If the install fails with `Unrecognized key: "displayName"`, remove that
+line from the plugin's `.claude-plugin/plugin.json` and install it from a local
+marketplace. `docs/after-action/phase-5-apimatic.md` has the steps.
+
 ## Policy
 
 The default limits live in `config/policy.json`: per-payment cap, daily budget,
