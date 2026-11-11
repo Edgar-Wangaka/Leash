@@ -87,6 +87,7 @@
   td.to .memo { font-style: italic; color: var(--muted); overflow-wrap: anywhere; }
   .catalog { font: 12px/1.6 var(--mono); color: var(--blue); overflow-wrap: anywhere; max-width: 420px; }
   .catalog.bad { color: var(--blocked); }
+  .moved { font: 12px/1.6 var(--mono); color: var(--blocked); font-weight: 600; max-width: 420px; }
   td.sum { font: 600 19px/1.2 var(--mono); white-space: nowrap; }
   tr.is-blocked td.sum { color: var(--blocked); text-decoration: line-through; text-decoration-thickness: 1.5px; }
   td.why { font-size: 14px; color: var(--muted); min-width: 220px; max-width: 300px; overflow-wrap: anywhere; }
@@ -253,7 +254,26 @@
     $("rate").textContent = p.max_requests_per_minute;
   }
 
-  function renderHolds(holds) {
+  // Channel3 said the price or stock changed after this request was made.
+  function movedLines(alert) {
+    if (!alert) return [];
+    const lines = [], when = (t) => new Date(t).toLocaleString();
+    const p = alert.price;
+    if (p && p.previous && p.current) {
+      const was = Number(p.previous.price), now = Number(p.current.price);
+      const pct = was ? Math.round((now - was) / was * 100) : 0;
+      lines.push(el("div", "moved", "Price changed since this request: " + money(was) + " → " + money(now) +
+        " (" + (pct > 0 ? "+" : "") + pct + "%) at " + (p.domain || "the seller") + ", " + when(p.changed_at)));
+    }
+    const a = alert.availability;
+    if (a && a.current) {
+      lines.push(el("div", "moved", (a.current === "OutOfStock" ? "Now out of stock" : "Back in stock") +
+        " at " + (a.domain || "the seller") + ", " + when(a.changed_at)));
+    }
+    return lines;
+  }
+
+  function renderHolds(holds, alerts) {
     const box = $("holds"); box.replaceChildren();
     $("holdcount").textContent = holds.length ? holds.length + " waiting" : "";
     document.title = (holds.length ? "(" + holds.length + ") " : "") + "Leash";
@@ -263,6 +283,7 @@
       const body = el("div");
       body.append(el("div", "label", "Pay to"), el("div", "to", d.merchant_email), el("div", "memo", d.reason));
       const product = catalogLine(d); if (product) body.append(product);
+      body.append(...movedLines(alerts[d.request_id]));
       body.append(el("div", "because", "Requested by " + d.agent_id + ". " + d.explanation));
       const actions = el("div", "actions");
       const sign = el("button", "sign", "Approve"), refuse = el("button", "refuse", "Deny");
@@ -309,7 +330,8 @@
       lastState = text;
       const state = JSON.parse(text);
       renderRules(state);
-      renderHolds(state.decisions.filter((d) => d.verdict === "hold_for_human" && d.status === "pending"));
+      renderHolds(state.decisions.filter((d) => d.verdict === "hold_for_human" && d.status === "pending"),
+        state.price_alerts || {});
       renderLedger(state.decisions);
     } catch (error) {
       lastState = ""; $("mode").textContent = "Dashboard server is not running"; $("mode").className = "down";

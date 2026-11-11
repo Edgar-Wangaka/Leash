@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import browser, config, events, settings
+from . import browser, config, events, price_watch, settings
 from .catalog import price_lookup_from_env
 from .events import public_record
 from .gate import PaymentGate
@@ -78,6 +78,8 @@ def build_state(gate: PaymentGate) -> dict[str, Any]:
         "daily_spend_usd": f"{gate.daily_spend_usd():.2f}",
         "decisions": [_public(record) for record in gate.list_decisions(100)],
         "settings": settings_state(gate),
+        # Channel3 price or stock changes since a waiting request was made.
+        "price_alerts": gate.price_alerts(),
     }
 
 
@@ -199,9 +201,49 @@ def make_handler(
             else:
                 self._json(404, {"error": "not_found"})
 
+        def _channel3_webhook(self) -> None:
+            # Channel3 has no dashboard token; its Svix signature is the proof.
+            secret = price_watch.webhook_secret_from_env()
+            if not secret:
+                self._json(404, {"error": "not_found"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except ValueError:
+                length = -1
+            if not 0 <= length <= price_watch.MAX_WEBHOOK_BYTES:
+                self._json(413, {"error": "too_large"})
+                return
+            body = self.rfile.read(length)
+            headers = {name.lower(): value for name, value in self.headers.items()}
+            if not price_watch.verify_signature(secret, headers, body):
+                self._json(401, {"error": "bad_signature"})
+                return
+            try:
+                event = json.loads(body)
+            except ValueError:
+                self._json(400, {"error": "bad_json"})
+                return
+            result = gate.record_price_event(event if isinstance(event, dict) else {})
+            subscription_id = ((event.get("data") or {}) if isinstance(event, dict) else {}).get(
+                "subscription_id"
+            )
+            product_id = (((event.get("data") or {}).get("subject") or {}).get("product_id")
+                          if isinstance(event, dict) else None)
+            if (subscription_id and product_id and not result.get("ignored")
+                    and not result["pending_request_ids"]):
+                # Nobody is waiting on this product any more: stop watching it.
+                threading.Thread(
+                    target=_stop_watching, args=(gate, product_id, subscription_id), daemon=True
+                ).start()
+            self._json(200, {"ok": True, "recorded": result["recorded"]})
+
         def do_POST(self) -> None:  # noqa: N802
             if not (self._local_host() and self._same_origin()):
                 self._json(403, {"error": "forbidden"})
+                return
+            if self.path == price_watch.WEBHOOK_PATH:
+                self._channel3_webhook()
                 return
             if not self._authorized():
                 self._json(401, {"error": "token_required"})
@@ -246,6 +288,16 @@ def make_handler(
             )
 
     return Handler
+
+
+def _stop_watching(gate: PaymentGate, product_id: str, subscription_id: str) -> None:
+    """Cancel a Channel3 subscription once no request waits on its product."""
+    watcher = price_watch.watcher_from_env()
+    try:
+        if watcher and not gate.has_pending_hold_for(product_id):
+            watcher.unwatch(subscription_id)
+    except Exception as error:  # a cleanup must never take the server down
+        logger.warning("Price watch cleanup failed: %s", error.__class__.__name__)
 
 
 def _reconcile_forever(gate: PaymentGate, stop: threading.Event) -> None:

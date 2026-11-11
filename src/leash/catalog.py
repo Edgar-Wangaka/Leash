@@ -109,8 +109,11 @@ def lookup_product(
         if response.status_code == 404:
             return unavailable("product_not_found")
         response.raise_for_status()
-        product = normalize_channel3_product(response.json(), allowlist)
-    except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+        raw = response.json()
+        product = normalize_channel3_product(raw, allowlist)
+        # The variant this price is for, so a price watch follows the same one.
+        selection = (raw.get("variants") or {}).get("selected") or None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError) as error:
         logger.warning("Channel3 lookup failed: %s", error.__class__.__name__)
         return unavailable(error.__class__.__name__)
     finally:
@@ -126,6 +129,8 @@ def lookup_product(
         "merchant_email": product["merchant_email"],
         "price_usd": product["amount_usd"],
     }
+    if selection:
+        result["selection"] = selection
     if with_history:
         result["history"] = price_history(
             product_id, api_key=api_key, http_client=http_client

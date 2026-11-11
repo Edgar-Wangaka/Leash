@@ -39,6 +39,7 @@ PAYPAL_STATUS_MAP = {
 
 # Re-sending a payout PayPal never answered (see _resend_unanswered). PayPal
 # keeps sender_batch_id and PayPal-Request-Id for 30 days; stay far inside that.
+PRICE_EVENT_KINDS = {"offer.price.changed", "offer.availability.changed"}
 MAX_RESENDS = 5
 RESEND_WINDOW = timedelta(days=7)
 
@@ -392,6 +393,91 @@ class PaymentGate:
             records = [self._get_decision(request_id, connection) for request_id in request_ids]
         return [record for record in records if record]
 
+    def record_price_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Store one Channel3 price or stock change. Changes no decision.
+
+        Returns whether it was new and which waiting requests it concerns.
+        """
+        data = event.get("data") if isinstance(event, dict) else None
+        subject = (data or {}).get("subject") or {}
+        kind = event.get("type") if isinstance(event, dict) else None
+        product_id = subject.get("product_id")
+        event_id = event.get("id") if isinstance(event, dict) else None
+        if kind not in PRICE_EVENT_KINDS or not isinstance(product_id, str) or not event_id:
+            return {"recorded": False, "pending_request_ids": [], "ignored": True}
+        # Stored in the same UTC ISO form as created_at, so the two compare as text.
+        try:
+            event_time = _parse_time(str(event.get("timestamp")).replace("Z", "+00:00"))
+        except ValueError:
+            event_time = self._now()
+        event_time = event_time.astimezone(timezone.utc).isoformat()
+        with self._connect() as connection:
+            inserted = connection.execute(
+                "INSERT OR IGNORE INTO price_events (event_id, kind, product_id, domain, "
+                "previous_json, current_json, event_time, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(event_id), kind, product_id, subject.get("domain"),
+                    json.dumps(data.get("previous")), json.dumps(data.get("current")),
+                    event_time, self._now().astimezone(timezone.utc).isoformat(),
+                ),
+            ).rowcount
+            pending = [
+                row[0] for row in connection.execute(
+                    "SELECT request_id FROM decisions WHERE status = 'pending' "
+                    "AND json_extract(request_json, '$.product_id') = ?",
+                    (product_id,),
+                ).fetchall()
+            ]
+        return {"recorded": inserted == 1, "pending_request_ids": pending}
+
+    def price_alerts(self) -> dict[str, dict[str, Any]]:
+        """For each waiting request, the latest price and stock change since it was made.
+
+        Only changes at the seller the request was priced from count. One
+        connection, whatever the number of requests.
+        """
+        alerts: dict[str, dict[str, Any]] = {}
+        with self._connect() as connection:
+            waiting = connection.execute(
+                "SELECT request_id, created_at, "
+                "json_extract(request_json, '$.product_id'), "
+                "json_extract(request_json, '$.catalog.sold_by') "
+                "FROM decisions WHERE status = 'pending' "
+                "AND json_extract(request_json, '$.product_id') IS NOT NULL"
+            ).fetchall()
+            for request_id, created_at, product_id, sold_by in waiting:
+                rows = connection.execute(
+                    "SELECT kind, domain, previous_json, current_json, event_time "
+                    "FROM price_events WHERE product_id = ? AND event_time >= ? "
+                    "AND (? IS NULL OR domain IS NULL OR domain = ?) "
+                    "ORDER BY event_time",
+                    (product_id, created_at, sold_by, sold_by),
+                ).fetchall()
+                latest: dict[str, Any] = {}
+                for kind, domain, previous, current, event_time in rows:
+                    key = "price" if kind == "offer.price.changed" else "availability"
+                    first = latest.get(key)
+                    latest[key] = {
+                        "domain": domain,
+                        # What it was when first changed after the request, and now.
+                        "previous": first["previous"] if first else json.loads(previous or "null"),
+                        "current": json.loads(current or "null"),
+                        "changed_at": event_time,
+                        "changes": (first["changes"] + 1) if first else 1,
+                    }
+                if latest:
+                    alerts[request_id] = latest
+        return alerts
+
+    def has_pending_hold_for(self, product_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM decisions WHERE status = 'pending' "
+                "AND json_extract(request_json, '$.product_id') = ? LIMIT 1",
+                (product_id,),
+            ).fetchone()
+        return row is not None
+
     def daily_spend_usd(self) -> Decimal:
         """Money committed in the last 24 hours, as the budget rule counts it."""
         return self._state()["daily_spend_usd"]
@@ -636,6 +722,26 @@ class PaymentGate:
             )
             if "amount_cents" not in columns:
                 connection.execute("UPDATE decisions SET amount_cents = CAST(ROUND(CAST(amount_usd AS REAL) * 100) AS INTEGER)")
+            # Channel3 price and stock changes (see price_watch). event_id is
+            # Channel3's, so a redelivered webhook is stored once.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_events (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    domain TEXT,
+                    previous_json TEXT,
+                    current_json TEXT,
+                    event_time TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_price_events_product "
+                "ON price_events(product_id, event_time)"
+            )
 
     def _insert_decision(
         self,

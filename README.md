@@ -115,6 +115,25 @@ compares the amount with the live price:
   history skip this check. `price_spike_pct` and `price_history_min_points` in
   `config/policy.json` change the 25% and the 7.
 
+**Price watch.** While a request waits for you, Leash can watch its product
+for price and stock changes at the seller it was priced from (Channel3 Product
+Subscriptions), and show the change on the waiting request: "Price changed
+since this request: $55.00 → $42.00 (−24%)". It only shows changes; it never
+approves or blocks anything. To turn it on for the Render deployment:
+
+1. In the [Channel3 dashboard](https://trychannel3.com/dashboard), open the
+   webhook portal and add an endpoint
+   `https://<your Render host>/webhooks/channel3` with the events
+   `offer.price.changed` and `offer.availability.changed`.
+2. Copy that endpoint's signing secret (it starts with `whsec_`) into Render's
+   Environment tab as `CHANNEL3_WEBHOOK_SECRET`.
+3. In the portal, use "Send example" (or wait for a real change) to check it.
+
+Without the secret nothing is subscribed and the endpoint answers 404.
+Channel3 re-checks a watched product about once a day, so changes are not
+instant. A subscription is cancelled when a change arrives for a product no
+request is waiting on any more.
+
 The dashboard shows the retailer and live price that Channel3 returned next
 to each request. Two settings in `config/policy.json` control the check:
 `price_tolerance_pct` changes the 5%, and `require_catalog_product: false`

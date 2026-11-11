@@ -135,4 +135,10 @@ def from_env() -> list[tuple[str, Sink]]:
         except (ValueError, UnicodeDecodeError, binascii.Error) as error:
             logger.warning("Elastic sink not started: %s", error.__class__.__name__)
 
+    from .price_watch import watch_sink, watcher_from_env  # avoids an import cycle
+
+    watcher = watcher_from_env()
+    if watcher is not None:
+        built.append(("channel3_price_watch", watch_sink(watcher)))
+
     return built

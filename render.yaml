@@ -34,6 +34,10 @@ services:
         value: https://api-m.sandbox.paypal.com
       - key: CHANNEL3_API_KEY
         sync: false
+      # The whsec_ signing secret of the /webhooks/channel3 endpoint in the
+      # Channel3 dashboard's webhook portal. Turns on the price watch.
+      - key: CHANNEL3_WEBHOOK_SECRET
+        sync: false
       - key: ELASTIC_URL
         sync: false
       - key: ELASTIC_API_KEY

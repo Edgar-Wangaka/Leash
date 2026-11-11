@@ -59,12 +59,14 @@ def test_spec_decision_schema_matches_the_public_record():
     assert set(events.public_record(record)) == documented
 
 
-def test_only_health_and_the_demo_page_skip_the_token():
+def test_only_health_the_demo_page_and_the_signed_webhook_skip_the_token():
     open_routes = {
         path for path, operations in SPEC["paths"].items()
         for operation in operations.values() if operation.get("security") == []
     }
-    assert open_routes == {"/healthz", "/demo/listing/{slug}"}
+    # The Channel3 webhook has no token but must carry a valid Svix signature
+    # (tests/test_price_watch.py checks that it refuses one without).
+    assert open_routes == {"/healthz", "/demo/listing/{slug}", "/webhooks/channel3"}
 
 
 def test_every_internal_ref_resolves():

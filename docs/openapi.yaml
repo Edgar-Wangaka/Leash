@@ -209,6 +209,49 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /webhooks/channel3:
+    post:
+      tags: [settings]
+      operationId: channel3PriceWebhook
+      summary: Channel3 tells Leash a watched product's price or stock changed
+      description: |
+        Called by Channel3 (Svix), not by people. Signed with the endpoint's
+        `whsec_` secret (`CHANNEL3_WEBHOOK_SECRET`): headers `svix-id`,
+        `svix-timestamp`, `svix-signature`. No dashboard token. Leash stores
+        `offer.price.changed` and `offer.availability.changed` once per event
+        `id` and shows them on waiting requests; it changes no decision.
+        Off (404) when the secret is not set.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, type, data]
+              properties:
+                id: { type: string }
+                timestamp: { type: string, format: date-time }
+                type: { type: string, examples: [offer.price.changed, offer.availability.changed] }
+                data: { type: object }
+      responses:
+        "200":
+          description: Accepted. `recorded` is false for a redelivery or an ignored event.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  recorded: { type: boolean }
+        "401":
+          description: Missing, wrong or stale signature.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /demo/listing/{slug}:
     get:
       tags: [demo]
@@ -419,3 +462,11 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Decision" }
         settings: { $ref: "#/components/schemas/Settings" }
+        price_alerts:
+          type: object
+          description: |
+            Per waiting request ID, the Channel3 price (`price`) and stock
+            (`availability`) changes at its seller since the request was made:
+            `previous` (before the first change), `current`, `changed_at`,
+            `changes`, `domain`.
+          additionalProperties: { type: object }
