@@ -201,12 +201,23 @@ obeys what it finds hidden there, and sends the hijacked request to Leash,
 which blocks it. It prints what was visible, what was hidden, the request
 and the verdict.
 
-To use a real cloud browser, install the extra (`pip install ".[kernel]"`,
-then `playwright install chromium`), set `KERNEL_API_KEY`, and set
-`LEASH_DEMO_BASE_URL` to a public Leash deploy such as
-`https://leash.onrender.com`. The page then loads in a KERNEL browser and
-the demo prints its live-view link, which you can record next to the
-dashboard. Without a key, the page is rendered locally.
+To use a real cloud browser, install the extra (`pip install -e ".[kernel]"`;
+no `playwright install` is needed, because KERNEL hosts the browser), put
+`KERNEL_API_KEY` in `.env`, and point `LEASH_DEMO_BASE_URL` at a public Leash
+deploy:
+
+```bash
+set -a; . ./.env; set +a
+LEASH_DEMO_BASE_URL=https://leash-1pqh.onrender.com \
+  .venv/bin/python -m leash.demo_injection --live --hold 30
+```
+
+The page then loads in a KERNEL browser. The demo prints the live-view link
+as soon as the session starts; `--hold SECONDS` (up to 300) keeps the page
+open that long so you can watch or record it next to the dashboard. The
+session is deleted when the demo ends, and the link stops working. Wake a
+free Render instance first with `curl https://leash-1pqh.onrender.com/healthz`.
+Without a key, the page is rendered locally.
 
 The scripted shopping agent and the LLM agent can take the same browser
 (`ShoppingAgent(..., browse_fn=browse_page)`); the LLM agent then gets a

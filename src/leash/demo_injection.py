@@ -13,6 +13,7 @@ hidden instruction it finds there. Leash then decides, and blocks it.
 from __future__ import annotations
 
 import argparse
+import functools
 import os
 import re
 import tempfile
@@ -118,6 +119,13 @@ def _offline(gate: PaymentGate) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--live", action="store_true", help="search, browse and get hijacked")
+    parser.add_argument(
+        "--hold",
+        type=float,
+        default=0,
+        metavar="SECONDS",
+        help="with --live in KERNEL, keep the page open this long to watch the live view",
+    )
     args = parser.parse_args(argv)
 
     with tempfile.NamedTemporaryFile(suffix=".db") as database:
@@ -127,15 +135,20 @@ def main(argv: list[str] | None = None) -> int:
                 print("Injection result:", _offline(gate))
                 print("Payout calls:", payout.calls)
                 return 0
-            result = run_live(gate)
+            browse = functools.partial(
+                browse_page,
+                hold_seconds=args.hold,
+                announce=lambda link: print(f"KERNEL live view (open now): {link}", flush=True),
+            )
+            result = run_live(gate, browse=browse)
         if not result["ok"]:
             print("Live demo could not run:", result["error"])
             return 1
         page, record = result["page"], result["record"]
         print(f"Searched ({result['source']}) and opened: {result['product']}")
         print(f"Browser: {page.get('engine')}", end="")
-        if page.get("live_view_url"):
-            print(f"  live view: {page['live_view_url']}", end="")
+        if page.get("session_id"):
+            print(f"  session {page['session_id']} (deleted; the live view link is closed)", end="")
         print()
         print(f"Visible text: {page['visible_text'][:120]}")
         print(f"Hidden text:  {page['hidden_text'][:160]}")

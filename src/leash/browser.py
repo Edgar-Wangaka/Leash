@@ -12,6 +12,7 @@ Nothing returned here is trusted. It is shown to the agent, never to the gate.
 
 from __future__ import annotations
 
+import functools
 import html
 import json
 import logging
@@ -176,24 +177,45 @@ def _fetch(url: str, http_client: httpx.Client | None = None) -> str:
             client.close()
 
 
-def _kernel_html(url: str) -> tuple[str, dict[str, Any]]:  # pragma: no cover - needs KERNEL
-    """Load the page in a KERNEL cloud browser. Returns HTML and session info."""
+MAX_HOLD_SECONDS = 300
+
+
+def _kernel_html(
+    url: str,
+    *,
+    hold_seconds: float = 0,
+    announce: Callable[[str], None] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Load the page in a KERNEL cloud browser. Returns HTML and session info.
+
+    ``announce`` gets the live-view URL as soon as the session exists, because
+    the session (and so the link) is deleted before this returns.
+    ``hold_seconds`` keeps the page open that long after it loads, so someone
+    can watch it in the live view.
+    """
     from kernel import Kernel
     from playwright.sync_api import sync_playwright
 
+    hold = max(0.0, min(float(hold_seconds), MAX_HOLD_SECONDS))
     client = Kernel()  # reads KERNEL_API_KEY
-    session = client.browsers.create()
+    # A held session gets a server-side timeout too, so it dies even if we do.
+    options = {"timeout_seconds": int(hold) + 60} if hold else {}
+    session = client.browsers.create(**options)
     info = {
         "session_id": getattr(session, "session_id", None),
         "live_view_url": getattr(session, "browser_live_view_url", None),
     }
     try:
+        if announce and info["live_view_url"]:
+            announce(info["live_view_url"])
         with sync_playwright() as playwright:
             browser = playwright.chromium.connect_over_cdp(session.cdp_ws_url)
             context = browser.contexts[0] if browser.contexts else browser.new_context()
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             content = page.content()
+            if hold:
+                page.wait_for_timeout(hold * 1000)
             browser.close()
         return content, info
     finally:
@@ -212,12 +234,20 @@ def browse_page(
     *,
     http_client: httpx.Client | None = None,
     kernel_loader: Callable[[str], tuple[str, dict[str, Any]]] | None = None,
+    hold_seconds: float = 0,
+    announce: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Load ``url`` and return its visible and hidden text. Never raises."""
+    """Load ``url`` and return its visible and hidden text. Never raises.
+
+    ``hold_seconds`` and ``announce`` only apply to the KERNEL browser; see
+    ``_kernel_html``.
+    """
     engine = "local"
     session: dict[str, Any] = {}
     try:
-        loader = kernel_loader or (_kernel_html if kernel_enabled() else None)
+        loader = kernel_loader
+        if loader is None and kernel_enabled():
+            loader = functools.partial(_kernel_html, hold_seconds=hold_seconds, announce=announce)
         # A cloud browser can only open a full public URL. A bare demo path
         # such as /demo/listing/x is rendered locally instead.
         if loader is not None and urlparse(url).scheme in {"http", "https"}:
