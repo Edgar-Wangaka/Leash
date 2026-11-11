@@ -73,6 +73,9 @@ def public_record(record: dict[str, Any]) -> dict[str, Any]:
         "risk_signal": record["risk_signal"],
         "approved_by": record["approved_by"],
         "paypal_batch_id": payout.get("paypal_batch_id"),
+        "paypal_transaction_id": payout.get("transaction_id"),
+        "paypal_status": payout.get("transaction_status") or payout.get("batch_status"),
+        "paypal_time_processed": payout.get("time_processed"),
         "error_name": record["error_name"],
         "created_at": record["created_at"],
     }

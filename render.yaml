@@ -18,8 +18,13 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.9"
+      # "true": no PayPal calls at all. "false": real PayPal calls to the
+      # sandbox below (test money). Leash refuses to start against any other
+      # PayPal host unless LEASH_ALLOW_LIVE=true is also set.
       - key: DRY_RUN
-        value: "true"
+        sync: false
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
       - key: LEASH_PUBLIC_HOST
         sync: false          # e.g. leash.onrender.com or your custom domain
       - key: LEASH_DASHBOARD_TOKEN

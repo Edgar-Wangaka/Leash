@@ -297,6 +297,10 @@ class PayPalClient:
             "batch_status": batch_header.get("batch_status"),
             "transaction_status": item.get("transaction_status"),
             "error_name": error.get("name"),
+            # Shown on the dashboard, so a payout can be found in PayPal.
+            "payout_item_id": item.get("payout_item_id"),
+            "transaction_id": item.get("transaction_id"),
+            "time_processed": item.get("time_processed"),
         }
 
     def find_payout_batch(self, sender_batch_id: str) -> dict[str, Any] | None:

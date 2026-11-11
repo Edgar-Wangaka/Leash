@@ -246,7 +246,7 @@
   };
   const money = (value) => "$" + Number(value).toFixed(2);
   const seen = new Set();
-  let firstRender = true, lastState = "";
+  let firstRender = true, lastState = "", currentMode = "";
 
   // What the Channel3 catalog says about the product the agent named.
   function catalogLine(d) {
@@ -259,6 +259,14 @@
       ? " (usually " + money(h.median_usd) + ", " + h.days + "-day median)" : "";
     return el("div", "catalog" + (over ? " bad" : ""),
       "Channel3 lists it at " + money(c.price_usd) + " from " + c.sold_by + usual);
+  }
+
+  // Real retailers have no PayPal sandbox account, so each one is paid
+  // through a sandbox account that stands in for it. Say so plainly.
+  function standInLine(d) {
+    const c = d.catalog;
+    if (currentMode === "live" || !c || c.status !== "ok" || !c.sold_by) return null;
+    return el("div", "memo", "Paid to the sandbox account standing in for " + c.sold_by);
   }
 
   function outcome(d) {
@@ -300,7 +308,8 @@
 
   function renderRules(state) {
     const modes = { "dry-run": ["Dry run: no money moves", "dry"],
-      "sandbox": ["PayPal sandbox", "sandbox"], "live": ["Live PayPal", "live"] };
+      "sandbox": ["PayPal sandbox: real PayPal, test money", "sandbox"], "live": ["Live PayPal", "live"] };
+    currentMode = state.mode;
     const [modeText, modeClass] = modes[state.mode] || [state.mode, "down"];
     $("mode").textContent = modeText; $("mode").className = modeClass;
 
@@ -356,6 +365,7 @@
       const body = el("div");
       body.append(el("div", "label", "Pay to"), el("div", "to", d.merchant_email), el("div", "memo", d.reason));
       const product = catalogLine(d); if (product) body.append(product);
+      const standIn = standInLine(d); if (standIn) body.append(standIn);
       body.append(...movedLines(alerts[d.request_id]));
       body.append(el("div", "because", "Requested by " + d.agent_id + ". " + d.explanation));
       const actions = el("div", "actions");
@@ -380,8 +390,11 @@
       seen.add(d.request_id);
       const to = el("td", "to"); to.append(el("div", "", d.merchant_email), el("div", "memo", d.reason));
       const product = catalogLine(d); if (product) to.append(product);
+      const standIn = standInLine(d); if (standIn) to.append(standIn);
       const result = el("td"); result.append(el("span", "stamp " + cls, text));
       if (d.paypal_batch_id) result.append(el("div", "ref", "PayPal batch " + d.paypal_batch_id));
+      if (d.paypal_transaction_id) result.append(el("div", "ref", "PayPal transaction " + d.paypal_transaction_id));
+      if (d.paypal_status && d.paypal_batch_id) result.append(el("div", "ref", "PayPal says " + d.paypal_status));
       if (d.error_name) result.append(el("div", "ref", d.error_name));
       row.append(el("td", "when", new Date(d.created_at).toLocaleTimeString()), el("td", "who", d.agent_id),
         to, el("td", "sum r", money(d.amount_usd)), result, el("td", "why", d.explanation));

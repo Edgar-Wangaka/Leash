@@ -378,6 +378,9 @@ components:
         risk_signal: { type: string }
         approved_by: { type: [string, "null"] }
         paypal_batch_id: { type: [string, "null"] }
+        paypal_transaction_id: { type: [string, "null"], description: PayPal's transaction ID for the payout item, once PayPal has processed it. }
+        paypal_status: { type: [string, "null"], description: "PayPal's own status for the payout, e.g. PENDING, SUCCESS, UNCLAIMED." }
+        paypal_time_processed: { type: [string, "null"], format: date-time }
         error_name: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
 
