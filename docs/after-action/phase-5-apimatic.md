@@ -84,10 +84,35 @@ PayPal never pays a `sender_batch_id` used in the last 30 days twice, keeps
 
 Full suite after the follow-up: **271 passed, 1 skipped**.
 
-Not verified against real PayPal sandbox: the exact shape of PayPal's
-duplicate-batch error. The code only relies on its `links` entry pointing to
-`/v1/payments/payouts/{id}`, which the schema describes as a "HATEOAS link to
-the original payout".
+## Sandbox run with a forced timeout (2026-11-11)
+
+Run against `api-m.sandbox.paypal.com` with $1.00 sandbox payouts to an
+allowlisted sandbox seller. The script is not in the repo; the steps are:
+
+| Case | How it was forced | First run | After the fix |
+|---|---|---|---|
+| A: PayPal got it, the answer was lost | 1 ms read timeout on the POST | Resend marked it **failed**, but the batch existed and paid | Resend found batch `ELEGR8WDS9PRY`; item SUCCESS |
+| B: never reached PayPal | Base URL pointed at a closed local port | Resend paid once (`CVRUBZXEXY9SA`); item SUCCESS | Same (`UVM28MMXM5LYN`); a second resend made no request |
+
+**What the sandbox showed that the schema did not:**
+
+1. **A resend with the same `PayPal-Request-Id` doesn't replay the first
+   answer.** It returns 400 `USER_BUSINESS_ERROR`, with
+   `details[0].field = SENDER_BATCH_ID`, the issue "Batch with given
+   sender_batch_id already exists", and the link to the original batch under
+   `details[0].link`. There's no top-level `links`. Leash only read top-level
+   `links`, so it took this as a plain refusal and marked a paid payout
+   **failed**, outside the daily spend. That was the worst outcome possible,
+   and the mocked tests had used a guessed error shape.
+   - **Fix:** read `details[].link` as well.
+   - **Second guard:** on a resend, any error naming `SENDER_BATCH_ID` stays
+     `needs_reconcile`, never `failed`, even if no link can be read.
+2. **The item is SUCCESS while the batch is still PROCESSING.** The client's
+   wait loop only recorded success once both said SUCCESS. It now goes by the
+   item, as the gate already does.
+
+Both are covered by tests that use the exact error body from the sandbox.
+Full suite: **274 passed, 1 skipped**.
 
 ## Tests
 

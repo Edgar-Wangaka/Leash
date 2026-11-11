@@ -213,19 +213,41 @@ class PayPalClient:
                 original = self._linked_batch_id(error.response)
                 if original:
                     return "submitted", original, None
-                if code in {401, 403}:
-                    return "needs_reconcile", None, None  # our credentials, not the payout
+                if code in {401, 403} or self._mentions_sender_batch_id(error.response):
+                    # Our credentials, or a batch that exists but whose link we
+                    # could not read: either way not proof that nothing was paid.
+                    return "needs_reconcile", None, None
             # A refusal of a sender_batch_id PayPal has not seen means no payout exists.
             return "failed", None, self._error_name(error)
         except (RuntimeError, ValueError):
             return "needs_reconcile", None, None
 
     @staticmethod
-    def _linked_batch_id(response: httpx.Response) -> str | None:
+    def _error_body(response: httpx.Response) -> dict[str, Any]:
         try:
-            links = response.json().get("links") or []
-        except (ValueError, AttributeError):
-            return None
+            body = response.json()
+        except ValueError:
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    @classmethod
+    def _mentions_sender_batch_id(cls, response: httpx.Response) -> bool:
+        details = cls._error_body(response).get("details") or []
+        return any(
+            isinstance(d, dict) and str(d.get("field", "")).upper() == "SENDER_BATCH_ID"
+            for d in details
+        )
+
+    @classmethod
+    def _linked_batch_id(cls, response: httpx.Response) -> str | None:
+        # Seen in the sandbox (2026-11): the duplicate-batch error is
+        # USER_BUSINESS_ERROR with the link under details[].link, not in a
+        # top-level "links". Accept both.
+        body = cls._error_body(response)
+        links = list(body.get("links") or [])
+        for detail in body.get("details") or []:
+            if isinstance(detail, dict):
+                links += list(detail.get("link") or []) + list(detail.get("links") or [])
         prefix = "/v1/payments/payouts/"
         for link in links:
             path = httpx.URL(str(link.get("href", ""))).path if isinstance(link, dict) else ""
@@ -301,7 +323,9 @@ class PayPalClient:
                 or batch_status in NOT_PAID_STATUSES
                 or error_name in FAILURE_NAMES
             ):
-                if batch_status == "SUCCESS" and transaction_status == "SUCCESS":
+                # Seen in the sandbox: the item is SUCCESS while the batch
+                # still says PROCESSING. The item is what was paid.
+                if (transaction_status or batch_status) == "SUCCESS":
                     self._update_by_batch_id(paypal_batch_id, "success", None)
                 elif (
                     batch_status in NOT_PAID_STATUSES

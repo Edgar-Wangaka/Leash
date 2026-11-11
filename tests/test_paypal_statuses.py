@@ -156,3 +156,31 @@ def test_client_keeps_waiting_while_the_item_is_on_hold(tmp_path, monkeypatch):
 
     assert len(waits) == 1  # waited once while ONHOLD, then saw SUCCESS
     assert stored["status"] == "success"
+
+
+def test_client_records_success_when_the_item_is_paid_before_the_batch_finishes(tmp_path, monkeypatch):
+    # Seen in the PayPal sandbox: item SUCCESS while the batch is PROCESSING.
+    monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("PAYPAL_BASE_URL", "https://paypal.test")
+
+    def handler(request):
+        if request.url.path == "/v1/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        if request.method == "POST":
+            return httpx.Response(
+                201, json={"batch_header": {"payout_batch_id": "b-3", "batch_status": "PENDING"}}
+            )
+        return httpx.Response(200, json={
+            "batch_header": {"batch_status": "PROCESSING"},
+            "items": [{"transaction_status": "SUCCESS"}],
+        })
+
+    with PayPalClient(
+        db_path=str(tmp_path / "payouts.db"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda seconds: pytest.fail("should not wait on a paid item"),
+    ) as client:
+        client.send_payout("key-p", "receiver@example.com", "1.00", "Test")
+        client.wait_for_final_status("b-3", timeout_s=30)
+        assert client._get_record("key-p")["status"] == "success"

@@ -85,6 +85,42 @@ def test_resend_reads_the_original_batch_from_paypals_duplicate_error(tmp_path, 
     assert again["error_name"] is None
 
 
+# The duplicate-batch error exactly as the PayPal sandbox returned it (2026-11):
+# the link sits under details[].link, and there is no top-level "links".
+SANDBOX_DUPLICATE = {
+    "name": "USER_BUSINESS_ERROR",
+    "details": [{
+        "field": "SENDER_BATCH_ID",
+        "location": "body",
+        "issue": "Batch with given sender_batch_id already exists",
+        "link": [{"href": "https://api.sandbox.paypal.com/v1/payments/payouts/AQ9WY9Z5NZ5E2",
+                  "rel": "self", "method": "GET", "encType": "application/json"}],
+    }],
+}
+
+
+def test_resend_reads_the_batch_from_the_sandbox_shaped_duplicate_error(tmp_path, paypal_env):
+    client, _ = client_with(
+        tmp_path, [httpx.ReadTimeout("x"), httpx.Response(400, json=SANDBOX_DUPLICATE)]
+    )
+    with client:
+        client.send_payout("req-s", "seller@example.com", "1.00", "n")
+        again = client.resend_payout("req-s", "seller@example.com", "1.00", "n")
+
+    # Before the fix this was "failed": paid in PayPal, shown failed in Leash.
+    assert again["status"] == "submitted"
+    assert again["paypal_batch_id"] == "AQ9WY9Z5NZ5E2"
+
+
+def test_a_duplicate_error_without_a_readable_link_is_never_failed(tmp_path, paypal_env):
+    body = {**SANDBOX_DUPLICATE, "details": [{**SANDBOX_DUPLICATE["details"][0], "link": []}]}
+    client, _ = client_with(tmp_path, [httpx.ReadTimeout("x"), httpx.Response(400, json=body)])
+    with client:
+        client.send_payout("req-t", "seller@example.com", "1.00", "n")
+        again = client.resend_payout("req-t", "seller@example.com", "1.00", "n")
+    assert again["status"] == "needs_reconcile"
+
+
 @pytest.mark.parametrize("answer", [
     httpx.Response(503, json={"name": "SERVICE_UNAVAILABLE"}),
     httpx.Response(401, json={"name": "AUTHENTICATION_FAILURE"}),
