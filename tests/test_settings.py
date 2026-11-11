@@ -403,6 +403,24 @@ def test_table_is_created_over_the_direct_url_once():
     assert sum(sql.startswith("CREATE TABLE") for sql, _ in pg.sql) == 1
 
 
+@pytest.mark.parametrize("pasted", [
+    '"postgresql://u:p@ep-x.neon.tech/db?sslmode=require"',
+    "  'postgresql://u:p@ep-x.neon.tech/db?sslmode=require'  ",
+    "psql 'postgresql://u:p@ep-x.neon.tech/db?sslmode=require'",
+])
+def test_common_paste_mistakes_are_tidied(tmp_path, monkeypatch, pasted):
+    monkeypatch.setenv("DATABASE_URL", pasted)
+    store = store_from_env(str(tmp_path / "a.db"))
+    assert store.dsn == "postgresql://u:p@ep-x.neon.tech/db?sslmode=require"
+
+
+def test_a_bad_url_names_the_variable_and_hides_the_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "https://secret-password@example.com")
+    with pytest.raises(SystemExit) as stop:
+        store_from_env(str(tmp_path / "a.db"))
+    assert "DATABASE_URL" in str(stop.value) and "secret-password" not in str(stop.value)
+
+
 def test_a_bad_database_url_stops_startup(tmp_path, monkeypatch):
     monkeypatch.setenv("LEASH_SETTINGS_DATABASE_URL", "postgresql://u:p@ep-x.neon.tech/db?sslmode=disable")
     with pytest.raises(SystemExit):

@@ -283,15 +283,16 @@ class PostgresSettingsStore:
     TABLE = "leash_policy_settings"
 
     def __init__(
-        self, dsn: str, namespace: str, now=None, connect=None, migrate_dsn: str | None = None
+        self, dsn: str, namespace: str, now=None, connect=None, migrate_dsn: str | None = None,
+        names: tuple[str, str] = ("The settings database URL", "The direct settings database URL"),
     ) -> None:
         if not namespace or len(namespace) > 200:
             raise ValueError("a settings namespace of 1-200 characters is required")
         # dsn: Neon's pooled URL (PgBouncer) for everyday reads and writes.
         # migrate_dsn: the direct URL, for creating the table; Neon advises
         # schema changes over a direct connection, not the pooler.
-        self.dsn = require_tls(dsn)
-        self.migrate_dsn = require_tls(migrate_dsn) if migrate_dsn else self.dsn
+        self.dsn = require_tls(dsn, names[0])
+        self.migrate_dsn = require_tls(migrate_dsn, names[1]) if migrate_dsn else self.dsn
         self.namespace = namespace
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._connect_fn = connect
@@ -415,17 +416,30 @@ class PostgresSettingsStore:
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 
-def require_tls(dsn: str) -> str:
-    """Refuse a remote database URL that would send the password in clear text."""
-    parts = urlsplit(dsn)
+def clean_url(value: str) -> str:
+    """Undo the usual paste mistakes: quotes from .env, Neon's ``psql '...'``."""
+    value = value.strip()
+    if value.startswith("psql "):
+        value = value[5:].strip()
+    while len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        value = value[1:-1].strip()
+    return value
+
+
+def require_tls(dsn: str, name: str = "The settings database URL") -> str:
+    """Refuse a remote database URL that would send the password in clear text.
+
+    Error messages name the variable, never its value.
+    """
+    parts = urlsplit(clean_url(dsn))
     if parts.scheme not in {"postgres", "postgresql"} or not parts.hostname:
-        raise ValueError("LEASH_SETTINGS_DATABASE_URL must be a postgres:// URL")
+        raise ValueError(f"{name} must be a postgres:// URL; check for extra text around it")
     if parts.hostname in LOCAL_HOSTS:
-        return dsn
+        return urlunsplit(parts)
     query = dict(parse_qsl(parts.query))
     mode = query.get("sslmode", "")
     if mode in {"disable", "allow", "prefer"}:
-        raise ValueError("a remote settings database needs sslmode=require or stricter")
+        raise ValueError(f"{name} needs sslmode=require or stricter")
     if not mode:
         query["sslmode"] = "require"
     return urlunsplit(parts._replace(query=urlencode(query)))
@@ -440,25 +454,29 @@ def default_namespace() -> str:
     return public or "local"
 
 
-def database_urls() -> tuple[str, str | None]:
-    """(pooled URL, direct URL) for the settings database, or ("", None).
+URL_VARIABLES = (
+    ("LEASH_SETTINGS_DATABASE_URL", "LEASH_SETTINGS_DATABASE_URL_UNPOOLED"),
+    ("DATABASE_URL", "DATABASE_URL_UNPOOLED"),
+)
+
+
+def database_urls() -> tuple[str, str | None, tuple[str, str]]:
+    """(pooled URL, direct URL, their variable names), or ("", None, ...).
 
     LEASH_SETTINGS_DATABASE_URL wins if set. Otherwise Neon's own variables,
     as `neon env pull` writes them: DATABASE_URL (pooled) and
     DATABASE_URL_UNPOOLED (direct).
     """
-    own = os.getenv("LEASH_SETTINGS_DATABASE_URL", "").strip()
-    if own:
-        return own, os.getenv("LEASH_SETTINGS_DATABASE_URL_UNPOOLED", "").strip() or None
-    neon = os.getenv("DATABASE_URL", "").strip()
-    if neon:
-        return neon, os.getenv("DATABASE_URL_UNPOOLED", "").strip() or None
-    return "", None
+    for pooled, direct in URL_VARIABLES:
+        value = clean_url(os.getenv(pooled, ""))
+        if value:
+            return value, clean_url(os.getenv(direct, "")) or None, (pooled, direct)
+    return "", None, URL_VARIABLES[-1]
 
 
 def store_from_env(db_path: str) -> SettingsStore:
     """Postgres when a settings database URL is set, else leash.db."""
-    dsn, migrate_dsn = database_urls()
+    dsn, migrate_dsn, names = database_urls()
     if not dsn:
         return SqliteSettingsStore(db_path)
     try:
@@ -470,7 +488,9 @@ def store_from_env(db_path: str) -> SettingsStore:
             'A settings database URL is set but psycopg is missing: pip install ".[postgres]"'
         ) from error
     try:
-        return PostgresSettingsStore(dsn, default_namespace(), migrate_dsn=migrate_dsn)
+        return PostgresSettingsStore(
+            dsn, default_namespace(), migrate_dsn=migrate_dsn, names=names
+        )
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
