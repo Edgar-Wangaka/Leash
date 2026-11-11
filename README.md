@@ -161,6 +161,29 @@ To run only the MCP server over HTTP on your own machine, set
 `LEASH_MCP_TRANSPORT=streamable-http` and `LEASH_MCP_TOKEN`, then start
 `python -m leash.mcp_server` (it listens on `127.0.0.1:8788`).
 
+## API spec and attack tests (Postman)
+
+The dashboard API is described in `docs/openapi.yaml` (OpenAPI 3.1). The
+Postman collection in `postman/` has two folders:
+
+- **Happy path:** health, state, a small payment that pays, a large one that
+  is held and then approved (and refused the second time), and one that is
+  held and then denied.
+- **Attacks:** no token, a wrong token, the agent's bearer-token style, a
+  cross-site Origin, a form post, a foreign Host, a hijacked $500 request
+  (blocked), and approving that blocked request (refused).
+
+Import the collection and the `Local` or `Render` environment, put your
+dashboard token in `dashboardToken` (a secret variable, empty in the repo),
+and run the collection. One run sends 4 test requests and the policy allows
+5 a minute, so wait a minute between runs. From the command line:
+
+```bash
+npx newman run postman/leash.postman_collection.json -e postman/render.postman_environment.json --env-var dashboardToken=<your token>
+```
+
+CI runs the same collection against a dry-run dashboard on every push.
+
 ## Watch an agent get hijacked in a real browser (KERNEL)
 
 The planted listing is also a real product page, served by the dashboard at

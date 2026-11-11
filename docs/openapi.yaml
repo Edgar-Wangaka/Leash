@@ -1,0 +1,295 @@
+openapi: 3.1.0
+info:
+  title: Leash dashboard API
+  version: 0.1.0
+  summary: Watch an AI agent's payment decisions and approve or deny held payments.
+  description: |
+    Leash is a payment gate between an AI agent and PayPal Payouts. Every
+    payment request is decided by fixed rules: paid, held for a human, or
+    blocked. This API is the human's side: read decisions, approve or deny
+    held payments, and send scripted test requests.
+
+    The agent never uses this API. It talks to the MCP endpoint at `/mcp`
+    with its own bearer token, which this API refuses.
+
+    Requests must use the deployment's own Host name. State-changing
+    requests must send `Content-Type: application/json` and, from a browser,
+    an Origin of the same host; anything else gets 403.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: https://leash-1pqh.onrender.com
+    description: Render deployment (dry run)
+  - url: http://127.0.0.1:8787
+    description: Local dashboard (python -m leash.dashboard)
+tags:
+  - name: health
+  - name: decisions
+  - name: approvals
+  - name: testing
+  - name: demo
+security:
+  - dashboardToken: []
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness check
+      description: Answers any Host and reveals nothing but that the process is up.
+      security: []
+      responses:
+        "200":
+          description: The service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, const: true }
+
+  /api/state:
+    get:
+      tags: [decisions]
+      operationId: getState
+      summary: Policy, today's spend and the latest 100 decisions
+      responses:
+        "200":
+          description: Current state.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/State" }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/approve:
+    post:
+      tags: [approvals]
+      operationId: approvePayment
+      summary: Approve a held payment and pay it
+      description: |
+        Only a pending `hold_for_human` decision can be approved. The hard
+        rules (cap, seller allowlist, daily budget) are checked again before
+        paying, so an approval can still be refused (`rejected_on_recheck`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id]
+              properties:
+                request_id: { type: string }
+      responses:
+        "200":
+          description: The outcome. `ok` is false when the approval was refused.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+        "400": { $ref: "#/components/responses/BadJson" }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/deny:
+    post:
+      tags: [approvals]
+      operationId: denyPayment
+      summary: Deny a held payment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request_id]
+              properties:
+                request_id: { type: string }
+                reason:
+                  type: string
+                  description: Shown in the decision log. Defaults to "Denied in dashboard".
+      responses:
+        "200":
+          description: The outcome. `ok` is false when the hold was already resolved.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActionResult" }
+        "400": { $ref: "#/components/responses/BadJson" }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/simulate:
+    post:
+      tags: [testing]
+      operationId: simulateRequest
+      summary: Send a scripted agent request through the same rules
+      description: |
+        `small` is normally paid, `large` is held for a human, and `attack`
+        (a hijacked agent paying an unknown seller $500) is blocked.
+        Requests count toward the rate limit and the daily budget like any other.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scenario]
+              properties:
+                scenario: { type: string, enum: [small, large, attack] }
+      responses:
+        "200":
+          description: The decision Leash made.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, record]
+                properties:
+                  ok: { type: boolean }
+                  record: { $ref: "#/components/schemas/Decision" }
+        "400": { $ref: "#/components/responses/BadJson" }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /demo/listing/{slug}:
+    get:
+      tags: [demo]
+      operationId: getDemoListing
+      summary: A fake product page carrying a hidden prompt injection
+      description: For the injection demo. Off when `LEASH_DEMO_PAGES=false`.
+      security: []
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema: { type: string, example: premium-birthday-gift-box }
+      responses:
+        "200":
+          description: The product page.
+          content:
+            text/html:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    dashboardToken:
+      type: apiKey
+      in: header
+      name: X-Leash-Token
+      description: |
+        The human's approval token (LEASH_DASHBOARD_TOKEN on a deployment, or
+        the one printed at startup locally). The agent's MCP token is refused.
+
+  responses:
+    TokenRequired:
+      description: Missing or wrong token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: token_required }
+    Forbidden:
+      description: Wrong Host, a cross-site Origin, or not JSON.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: forbidden }
+    BadJson:
+      description: The body was not valid JSON.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: bad_json }
+    NotFound:
+      description: Unknown path or scenario.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: not_found }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+
+    ActionResult:
+      type: object
+      required: [ok, status, reason]
+      properties:
+        ok: { type: boolean }
+        status:
+          type: string
+          description: The decision's status after the action.
+          examples: [paid, submitted, denied, rejected_on_recheck, expired]
+        reason:
+          type: [string, "null"]
+          description: Why the action was refused, when it was.
+          examples: [already_paid, approval_expired, not_human_hold, cap]
+
+    Verdict:
+      type: string
+      enum: [allow, hold_for_human, block]
+
+    Catalog:
+      type: [object, "null"]
+      description: What the Channel3 catalog said about the named product.
+      properties:
+        status: { type: string, enum: [ok, unavailable] }
+        product_id: { type: string }
+        name: { type: string }
+        sold_by: { type: string }
+        merchant_email: { type: string }
+        price_usd: { type: string }
+        error: { type: string }
+
+    Decision:
+      type: object
+      required: [request_id, agent_id, merchant_email, amount_usd, verdict, reasons, status, created_at]
+      properties:
+        request_id: { type: string }
+        agent_id: { type: string }
+        merchant_email: { type: string }
+        amount_usd: { type: string, pattern: "^\\d+\\.\\d{2}$", examples: ["8.00"] }
+        reason: { type: string, description: What the agent said the payment is for. }
+        product_id: { type: [string, "null"] }
+        verdict: { $ref: "#/components/schemas/Verdict" }
+        reasons:
+          type: array
+          items: { type: string }
+          description: Rules that fired, e.g. cap, allowlist, approval_threshold, price_mismatch.
+        status:
+          type: string
+          examples: [pending, blocked, paying, submitted, paid, failed, denied, expired]
+        explanation: { type: string }
+        catalog: { $ref: "#/components/schemas/Catalog" }
+        risk_signal: { type: string }
+        approved_by: { type: [string, "null"] }
+        paypal_batch_id: { type: [string, "null"] }
+        error_name: { type: [string, "null"] }
+        created_at: { type: string, format: date-time }
+
+    State:
+      type: object
+      required: [mode, policy, daily_spend_usd, decisions]
+      properties:
+        mode: { type: string, enum: [dry-run, sandbox, live] }
+        policy:
+          type: object
+          properties:
+            per_transaction_cap_usd: { type: number }
+            daily_budget_usd: { type: number }
+            approval_threshold_usd: { type: number }
+            max_requests_per_minute: { type: integer }
+            merchant_allowlist:
+              type: array
+              items: { type: string }
+        daily_spend_usd: { type: string }
+        decisions:
+          type: array
+          items: { $ref: "#/components/schemas/Decision" }

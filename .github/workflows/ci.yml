@@ -19,3 +19,29 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: pip install -e ".[test]"
       - run: pytest -q
+
+  postman:
+    # Runs the Postman collection against a local dry-run dashboard.
+    runs-on: ubuntu-latest
+    env:
+      DRY_RUN: "true"
+      LEASH_DASHBOARD_PORT: "8787"
+      LEASH_DASHBOARD_TOKEN: ci-only-dashboard-token-0001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pip install -e .
+      - name: Start the dashboard
+        run: |
+          python -m leash.dashboard > dashboard.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf localhost:8787/healthz && break; sleep 1; done
+      - name: Run the collection
+        run: >
+          npx -y newman@6.2.1 run postman/leash.postman_collection.json
+          -e postman/local.postman_environment.json
+          --env-var dashboardToken=$LEASH_DASHBOARD_TOKEN
