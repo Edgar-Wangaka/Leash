@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import browser, config, events
+from . import browser, config, events, settings
 from .catalog import price_lookup_from_env
 from .events import public_record
 from .gate import PaymentGate
@@ -77,6 +77,25 @@ def build_state(gate: PaymentGate) -> dict[str, Any]:
         },
         "daily_spend_usd": f"{gate.daily_spend_usd():.2f}",
         "decisions": [_public(record) for record in gate.list_decisions(100)],
+        "settings": settings_state(gate),
+    }
+
+
+def settings_state(gate: PaymentGate) -> dict[str, Any]:
+    """What the human can change, within which ranges, and recent changes."""
+    live = gate.settings
+    policy, version = live.current()
+    try:
+        history = live.store.history(10)
+    except Exception:
+        history = []
+    return {
+        "version": version,
+        "current": {field: policy[field] for field in settings.EDITABLE},
+        "defaults": live.defaults(),
+        "limits": settings.limits_for(live.file_policy),
+        "labels": settings.LABELS,
+        "history": history,
     }
 
 
@@ -193,12 +212,28 @@ def make_handler(
             except ValueError:
                 self._json(400, {"error": "bad_json"})
                 return
+            if not isinstance(body, dict):
+                self._json(400, {"error": "bad_json"})
+                return
 
             if self.path == "/api/approve":
                 result = gate.approve(str(body.get("request_id", "")), APPROVER)
             elif self.path == "/api/deny":
                 reason = str(body.get("reason") or "Denied in dashboard")
                 result = gate.deny(str(body.get("request_id", "")), APPROVER, reason)
+            elif self.path == "/api/settings":
+                result = gate.change_settings(
+                    body.get("changes") if "changes" in body else {},
+                    changed_by=APPROVER,
+                    confirm_loosening=body.get("confirm_loosening") is True,
+                    reset=body.get("reset") is True,
+                )
+                code = 200 if result["ok"] else (
+                    409 if result["reason"] == "confirm_loosening"
+                    else 503 if result["reason"] == "settings_store_unavailable" else 400
+                )
+                self._json(code, result)
+                return
             elif self.path == "/api/simulate" and body.get("scenario") in SCENARIOS:
                 self._json(200, {"ok": True, "record": simulate(gate, body["scenario"])})
                 return

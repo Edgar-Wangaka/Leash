@@ -11,5 +11,27 @@
   "approved_task_ids": [
     "demo-legitimate-task",
     "demo-review-task"
-  ]
+  ],
+  "editable_limits": {
+    "per_transaction_cap_usd": {
+      "max": 500
+    },
+    "daily_budget_usd": {
+      "max": 2000
+    },
+    "approval_threshold_usd": {
+      "max": 500
+    },
+    "max_requests_per_minute": {
+      "min": 1,
+      "max": 60
+    },
+    "human_approval_expiry_hours": {
+      "min": 1,
+      "max": 168
+    },
+    "merchant_allowlist": {
+      "max": 25
+    }
+  }
 }

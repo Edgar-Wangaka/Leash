@@ -17,6 +17,7 @@ from payouts.paypal_client import PayPalClient
 from . import events
 from .explainer import current_explanation, explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
+from .settings import LiveSettings, SettingsStore, SqliteSettingsStore
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +43,41 @@ class PaymentGate:
         risk_signal: Callable[[PaymentRequest, str], tuple[str, str]] | None = None,
         price_lookup: Callable[[str], dict[str, Any]] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        settings_store: SettingsStore | None = None,
     ) -> None:
         self.db_path = db_path
         # Told about each committed decision change. It sees a copy of the
         # record after the fact and cannot change the outcome.
         self._on_event = on_event if on_event is not None else events.emit
-        self.policy = load_policy(policy_path)
+        # policy.json gives the defaults; the human can change the editable
+        # limits from the dashboard, and every decision reads the latest.
+        self.settings = LiveSettings(
+            load_policy(policy_path), settings_store or SqliteSettingsStore(db_path)
+        )
         self.payout_client = payout_client or PayPalClient()
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._risk_signal = risk_signal or llm_risk_signal
         # Looks a product up in the catalog. None means no catalog is configured.
         self._price_lookup = price_lookup
         self._initialize_database()
+
+    @property
+    def policy(self) -> dict[str, Any]:
+        """The limits in force now: policy.json plus the human's latest change."""
+        return self.settings.policy()
+
+    def change_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        changed_by: str,
+        confirm_loosening: bool = False,
+        reset: bool = False,
+    ) -> dict[str, Any]:
+        """Change the editable limits. Only the dashboard calls this."""
+        return self.settings.change(
+            changes, changed_by=changed_by, confirm_loosening=confirm_loosening, reset=reset
+        )
 
     @contextmanager
     def _connect(self, timeout: float = 5.0) -> Iterator[sqlite3.Connection]:

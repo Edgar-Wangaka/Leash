@@ -238,7 +238,7 @@ gate still decide.
 
 ## Policy
 
-The limits live in `config/policy.json`: per-payment cap, daily budget,
+The default limits live in `config/policy.json`: per-payment cap, daily budget,
 approved sellers, approval threshold, requests per minute, approval expiry and
 approved task IDs. Whoever launches the MCP server sets the approved task
 through `LEASH_TASK_ID`. The model and the product data cannot set it.
@@ -247,6 +247,37 @@ The daily budget covers the last 24 hours of committed money. A payment that
 needed no approval counts from when it was requested; a held payment counts
 from when you approved it. Payouts that PayPal reports as unclaimed still
 count, because the money has left the account.
+
+### Changing the limits
+
+You can change the cap, the daily budget, the approval threshold, requests per
+minute, hold expiry and the approved sellers while Leash runs, with
+`POST /api/settings` and your dashboard token. The dashboard form arrives in a
+later phase. Every payment Leash decides afterwards uses the new limits, and
+the MCP server picks a change up within 2 seconds.
+
+- Only your dashboard token can do this. The agent has no tool for it, and the
+  dashboard refuses the agent's token.
+- Each value must fit the range under `editable_limits` in `policy.json`, and
+  the approval threshold ≤ the per-payment cap ≤ the daily budget.
+- Tightening a limit applies at once. Loosening one (raising a number, adding
+  a seller) is refused unless the request also sends `"confirm_loosening": true`.
+- `{"reset": true}` goes back to the `policy.json` defaults. Every change is
+  kept as a numbered version, with who changed what and when.
+- A payment already waiting for you is checked against the new limits when you
+  approve it.
+- If the settings store can't be read, Leash keeps the last limits it read
+  rather than falling back to possibly looser defaults.
+
+```bash
+curl -X POST http://127.0.0.1:8787/api/settings \
+  -H "Content-Type: application/json" -H "X-Leash-Token: $LEASH_DASHBOARD_TOKEN" \
+  -d '{"changes": {"daily_budget_usd": 150, "approval_threshold_usd": 25}}'
+```
+
+Changes are stored in `leash.db`. On Render's free plan that database is wiped
+on each deploy and restart, so hosted changes reset to the defaults until
+settings move to a free hosted database (the next phase).
 
 ## Tests
 

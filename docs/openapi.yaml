@@ -27,6 +27,7 @@ tags:
   - name: health
   - name: decisions
   - name: approvals
+  - name: settings
   - name: testing
   - name: demo
 security:
@@ -119,6 +120,54 @@ paths:
         "400": { $ref: "#/components/responses/BadJson" }
         "401": { $ref: "#/components/responses/TokenRequired" }
         "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/settings:
+    post:
+      tags: [settings]
+      operationId: changeSettings
+      summary: Change the spending limits
+      description: |
+        Changes the editable limits (per-payment cap, daily budget, approval
+        threshold, requests per minute, hold expiry, approved sellers). Values
+        must fit the ranges in `config/policy.json` (`editable_limits`), with
+        threshold <= cap <= daily budget. A change that loosens a limit is
+        refused with 409 unless `confirm_loosening` is true; tightening applies
+        at once. `reset: true` goes back to the policy.json defaults. Each saved
+        change is a new version, listed under `settings.history` in /api/state.
+        Only the dashboard token can call this; the agent has no such tool.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                changes: { $ref: "#/components/schemas/Limits" }
+                confirm_loosening: { type: boolean, default: false }
+                reset: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Saved, or `reason` is `unchanged` when nothing differed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsResult" }
+        "400":
+          description: Bad JSON, or `reason` is `invalid` with an error per field.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsResult" }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: The change loosens a limit and `confirm_loosening` was not set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsResult" }
+        "503":
+          description: The settings store could not be read; nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsResult" }
 
   /api/simulate:
     post:
@@ -274,6 +323,67 @@ components:
         error_name: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
 
+    Limits:
+      type: object
+      description: Any subset of the editable limits.
+      properties:
+        per_transaction_cap_usd: { type: number, minimum: 0 }
+        daily_budget_usd: { type: number, minimum: 0 }
+        approval_threshold_usd: { type: number, minimum: 0 }
+        max_requests_per_minute: { type: integer, minimum: 1 }
+        human_approval_expiry_hours: { type: integer, minimum: 1 }
+        merchant_allowlist:
+          type: array
+          items: { type: string, format: email }
+    SettingsResult:
+      type: object
+      required: [ok, reason]
+      properties:
+        ok: { type: boolean }
+        reason:
+          type: string
+          enum: [saved, unchanged, invalid, confirm_loosening, changed_by_required, settings_store_unavailable]
+        version: { type: integer }
+        changes:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              from: {}
+              to: {}
+        loosened:
+          type: array
+          items: { type: string }
+        errors:
+          type: object
+          additionalProperties: { type: string }
+        policy: { type: object }
+    Settings:
+      type: object
+      properties:
+        version: { type: [integer, "null"] }
+        current: { $ref: "#/components/schemas/Limits" }
+        defaults: { $ref: "#/components/schemas/Limits" }
+        limits:
+          type: object
+          description: Allowed range per field (min/max; for sellers, max is a count).
+          additionalProperties:
+            type: object
+            properties:
+              min: { type: number }
+              max: { type: number }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        history:
+          type: array
+          items:
+            type: object
+            properties:
+              version: { type: integer }
+              changes: { type: object }
+              changed_by: { type: string }
+              changed_at: { type: string, format: date-time }
     State:
       type: object
       required: [mode, policy, daily_spend_usd, decisions]
@@ -293,3 +403,4 @@ components:
         decisions:
           type: array
           items: { $ref: "#/components/schemas/Decision" }
+        settings: { $ref: "#/components/schemas/Settings" }
