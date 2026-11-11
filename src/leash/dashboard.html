@@ -616,7 +616,7 @@
     page.append(el("div", "hidden-text", "Hidden text on that page: " + r.hidden_text));
     out.append(page, el("div", "step", "The agent obeyed the hidden text instead of the listing."),
       decisionStep(r.hijacked_request, r.decision),
-      el("div", "answer", "Leash stopped it: the agent was fooled, but the payment rules were not."));
+      el("div", "answer", "Leash blocked the payment, so no money moved."));
   };
 
   // No token, or a wrong one: ask for it here instead of needing a terminal.

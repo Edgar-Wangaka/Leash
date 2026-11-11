@@ -138,12 +138,7 @@ The dashboard shows the retailer and live price that Channel3 returned next
 to each request. Two settings in `config/policy.json` control the check:
 `price_tolerance_pct` changes the 5%, and `require_catalog_product: false`
 lets a request that names no product through without a human. With no
-Channel3 key set, there is no catalog and none of these checks run. While a
-key is set, the test request buttons below name no product, so they are held.
-
-The dashboard also has three test request buttons that send fixed requests
-through the same rules, one of them a hijacked request. Use them when no model
-is attached.
+Channel3 key set, there is no catalog and none of these checks run.
 
 ## Run it on another machine (Render)
 
@@ -197,12 +192,13 @@ To run only the MCP server over HTTP on your own machine, set
 The dashboard API is described in `docs/openapi.yaml` (OpenAPI 3.1). The
 Postman collection in `postman/` has two folders:
 
-- **Happy path:** health, state, a small payment that pays, a large one that
-  is held and then approved (and refused the second time), and one that is
-  held and then denied.
-- **Attacks:** no token, a wrong token, the agent's bearer-token style, a
+- Happy path: health, state, a small payment that pays, a large one that is
+  held and then approved (and refused the second time), one that is held and
+  then denied, and four limit changes that end back at the defaults.
+- Attacks: no token, a wrong token, the agent's bearer-token style, a
   cross-site Origin, a form post, a foreign Host, a hijacked $500 request
-  (blocked), and approving that blocked request (refused).
+  (blocked), approving that blocked request (refused), and two refused limit
+  changes.
 
 Import the collection and the `Local` or `Render` environment, put your
 dashboard token in `dashboardToken` (a secret variable, empty in the repo),
@@ -224,19 +220,21 @@ each step: what it searched, which page it opened (and any hidden text on it),
 what it asked Leash to pay, and Leash's verdict. Anything held appears under
 "Waiting for your approval".
 
-- **Model:** Google Gemini's free tier. Set `GEMINI_API_KEY` (from
-  aistudio.google.com); the default model is `gemini-flash-lite-latest`
-  (`LEASH_AGENT_MODEL` changes it). Any OpenAI-compatible model works through
-  `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`. With no model set, a
-  rule-based agent runs instead and says so.
-- **What the agent can't do:** it has no approve tool and can't change a
-  limit. It can only open pages that appeared in its own search results, so
-  a prompt can't make the server fetch other addresses.
-- **Limits per run:** a 300-character task, 6 model turns, and 2 payment
-  requests. Overall: 3 runs a minute and 150 a day, counted in the database.
-- **The "Hijacked agent (no AI)" button** runs the injection demo with no
-  model. A naive agent opens a booby-trapped listing, obeys its hidden text,
-  and asks to pay $500 to an unknown seller. Leash blocks it.
+The model is Google Gemini's free tier: set `GEMINI_API_KEY` (from
+aistudio.google.com). The default model is `gemini-flash-lite-latest`, and
+`LEASH_AGENT_MODEL` changes it. Any OpenAI-compatible model also works through
+`LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`. With no model set, a rule-based
+agent runs instead and the page says so.
+
+The agent has no approve tool and can't change a limit. It can only open
+pages that appeared in its own search results, so a prompt can't make the
+server fetch other addresses. Each run allows a 300-character task, 6 model
+turns and 2 payment requests, and the box takes at most 3 runs a minute and
+150 a day.
+
+The "Hijacked agent (no AI)" button runs the injection demo without a model.
+A naive agent opens a booby-trapped listing, obeys its hidden text, and asks
+to pay $500 to an unknown seller. Leash blocks it.
 
 ## Watch an agent get hijacked in a real browser (KERNEL)
 
@@ -379,23 +377,24 @@ How it behaves:
   changes. If a URL is set but `psycopg` is missing, Leash refuses to start
   rather than quietly going back to `leash.db`.
 
-The same database also keeps the **payment log**: every decision, the PayPal
-payout records that stop a payment being sent twice, and Channel3 price
-changes. So a Render restart or deploy loses nothing. The details:
-- **Which copies use it:** only the dashboard (`python -m leash.dashboard`,
-  `python -m leash.remote`) and the MCP server. Demos and tests always use a
-  local file, so a scripted run never lands in the real log.
-- **Separation:** each copy works in its own Postgres schema, named like its
-  limits namespace (`leash_local` on your laptop, `leash_render` with
-  `LEASH_SETTINGS_NAMESPACE=render`). A laptop and Render sharing one Neon
-  database never see each other's payments.
-- **Same rules:** the checks that stop two approvals paying twice and two
-  requests overspending the budget hold in Postgres too.
-  `tests/test_db_postgres.py` runs them against a disposable database when
-  `LEASH_TEST_DATABASE_URL` is set (use a Neon branch, never production).
-- **Your laptop:** with `DATABASE_URL` in `.env`, a local dashboard writes to
-  the same Neon database, in the `leash_local` schema. To keep a purely local
-  run, start it with `DATABASE_URL=` (empty).
+The same database keeps the payment log: every decision, the PayPal payout
+records that stop a payment being sent twice, and Channel3 price changes, so
+a Render restart or deploy loses nothing. Only the dashboard
+(`python -m leash.dashboard`, `python -m leash.remote`) and the MCP server use
+it. Demos and tests always use a local file, so a scripted run never lands in
+the real log.
+
+Each copy works in its own Postgres schema, named like its limits namespace:
+`leash_local` on your laptop, `leash_render` with
+`LEASH_SETTINGS_NAMESPACE=render`. A laptop and Render sharing one Neon
+database never see each other's payments. The checks that stop two approvals
+paying twice and two requests overspending the budget hold in Postgres too;
+`tests/test_db_postgres.py` runs them against a disposable database when
+`LEASH_TEST_DATABASE_URL` is set (use a Neon branch, never production).
+
+With `DATABASE_URL` in `.env`, a local dashboard writes to the same Neon
+database, in the `leash_local` schema. Start it with `DATABASE_URL=` (empty)
+to keep a run purely local.
 
 ## Tests
 

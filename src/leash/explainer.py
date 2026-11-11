@@ -70,6 +70,12 @@ def explain(decision: dict[str, Any]) -> str:
             "velocity": "too many requests arrived in the last minute",
             "duplicate_request_id": "this request was already submitted",
             "unrequested_task": "it is not part of an approved task",
+            "price_unverified": "Channel3 could not confirm the price",
+            "price_spike": (
+                f"{amount} is more than {policy.get('price_spike_pct', 25)}% above "
+                "this product's usual price"
+            ),
+            "llm_suspicious": "the AI risk check flagged the request",
         }
         details = [
             labels.get(reason, reason.replace("_", " "))
