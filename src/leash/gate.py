@@ -17,7 +17,7 @@ from payouts.paypal_client import PayPalClient
 from . import events
 from .explainer import current_explanation, explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
-from .settings import LiveSettings, SettingsStore, SqliteSettingsStore
+from .settings import LiveSettings, SettingsStore, store_from_env
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ class PaymentGate:
         # policy.json gives the defaults; the human can change the editable
         # limits from the dashboard, and every decision reads the latest.
         self.settings = LiveSettings(
-            load_policy(policy_path), settings_store or SqliteSettingsStore(db_path)
+            load_policy(policy_path), settings_store or store_from_env(db_path)
         )
         self.payout_client = payout_client or PayPalClient()
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -98,6 +98,9 @@ class PaymentGate:
         close = getattr(self.payout_client, "close", None)
         if close:
             close()
+        close_store = getattr(self.settings.store, "close", None)
+        if close_store:
+            close_store()
 
     def __enter__(self) -> "PaymentGate":
         return self

@@ -275,9 +275,32 @@ curl -X POST http://127.0.0.1:8787/api/settings \
   -d '{"changes": {"daily_budget_usd": 150, "approval_threshold_usd": 25}}'
 ```
 
-Changes are stored in `leash.db`. On Render's free plan that database is wiped
-on each deploy and restart, so hosted changes reset to the defaults until
-settings move to a free hosted database (the next phase).
+Changes are stored in `leash.db` by default. On Render's free plan that file
+is wiped on each deploy and restart, so to keep them, point Leash at a free
+[Neon](https://neon.com) Postgres database:
+
+1. `pip install -e ".[postgres]"` (on Render: Build Command
+   `pip install ".[remote,postgres]"`).
+2. Put Neon's connection strings in `.env`. `neon init` and `neon env pull`
+   write them as `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct),
+   and Leash reads those. `LEASH_SETTINGS_DATABASE_URL` overrides them if you
+   want a different database for Leash.
+3. On Render, add the same two variables yourself (they are secrets), plus
+   `LEASH_SETTINGS_NAMESPACE=render`.
+
+How it behaves:
+- Each copy of Leash keeps its own limits in the shared table: `local` on your
+  machine, the public host name on Render unless `LEASH_SETTINGS_NAMESPACE`
+  is set. Changing limits on your laptop doesn't change the hosted ones.
+- Everyday reads use the pooled URL on one kept connection; the table is
+  created over the direct URL, as Neon recommends for schema changes.
+- A remote URL must use TLS (`sslmode=require` is added if missing).
+- Only the first read waits for Neon. After that a payment decision uses the
+  copy in memory, refreshed in the background every 2 seconds, so it never
+  waits on the network. Saving a change waits for Neon.
+- If Neon can't be reached, Leash keeps the last limits it read and refuses
+  changes. If a URL is set but `psycopg` is missing, Leash refuses to start
+  rather than quietly going back to `leash.db`.
 
 ## Tests
 

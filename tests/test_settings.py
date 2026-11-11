@@ -323,3 +323,266 @@ def test_state_works_without_any_change(tmp_path):
 def test_the_agent_has_no_settings_tool():
     source = Path(mcp_server.__file__).read_text()
     assert "change_settings" not in source and "/api/settings" not in source
+
+
+# --- S2: a hosted Postgres store (Neon) --------------------------------------------
+
+import os
+import sys
+import time
+import uuid
+from contextlib import contextmanager
+
+from leash.settings import PostgresSettingsStore, default_namespace, require_tls, store_from_env
+
+
+@pytest.mark.parametrize("dsn, expected", [
+    ("postgresql://u:p@ep-x.neon.tech/db", "postgresql://u:p@ep-x.neon.tech/db?sslmode=require"),
+    ("postgresql://u:p@ep-x.neon.tech/db?sslmode=verify-full",
+     "postgresql://u:p@ep-x.neon.tech/db?sslmode=verify-full"),
+    ("postgres://u:p@localhost/db", "postgres://u:p@localhost/db"),
+])
+def test_remote_database_urls_get_tls(dsn, expected):
+    assert require_tls(dsn) == expected
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://u:p@ep-x.neon.tech/db?sslmode=disable",
+    "postgresql://u:p@ep-x.neon.tech/db?sslmode=prefer",
+    "mysql://u:p@host/db",
+    "not a url",
+])
+def test_unsafe_or_wrong_database_urls_are_refused(dsn):
+    with pytest.raises(ValueError):
+        require_tls(dsn)
+
+
+def test_namespace_is_explicit_then_public_host_then_local(monkeypatch):
+    monkeypatch.delenv("LEASH_SETTINGS_NAMESPACE", raising=False)
+    monkeypatch.delenv("LEASH_PUBLIC_HOST", raising=False)
+    assert default_namespace() == "local"
+    monkeypatch.setenv("LEASH_PUBLIC_HOST", "Leash.Tech, www.leash.tech")
+    assert default_namespace() == "leash.tech"
+    monkeypatch.setenv("LEASH_SETTINGS_NAMESPACE", "render")
+    assert default_namespace() == "render"
+
+
+def test_store_comes_from_the_environment(tmp_path, monkeypatch):
+    assert isinstance(store_from_env(str(tmp_path / "a.db")), SqliteSettingsStore)
+    monkeypatch.setenv("LEASH_SETTINGS_DATABASE_URL", "postgresql://u:p@ep-x.neon.tech/db")
+    monkeypatch.setenv("LEASH_SETTINGS_NAMESPACE", "render")
+    store = store_from_env(str(tmp_path / "a.db"))
+    assert isinstance(store, PostgresSettingsStore)
+    assert store.namespace == "render" and store.dsn.endswith("sslmode=require")
+
+
+def test_neon_env_pull_variables_are_used(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@ep-x-pooler.neon.tech/db")
+    monkeypatch.setenv("DATABASE_URL_UNPOOLED", "postgresql://u:p@ep-x.neon.tech/db")
+    store = store_from_env(str(tmp_path / "a.db"))
+    assert "-pooler" in store.dsn and "-pooler" not in store.migrate_dsn
+    # Leash's own variable wins over Neon's generic one.
+    monkeypatch.setenv("LEASH_SETTINGS_DATABASE_URL", "postgresql://u:p@other.neon.tech/db")
+    assert "other.neon.tech" in store_from_env(str(tmp_path / "a.db")).dsn
+
+
+def test_table_is_created_over_the_direct_url_once():
+    seen = []
+    pg = FakePg()
+
+    def connect(dsn):
+        seen.append("direct" if "-pooler" not in dsn else "pooled")
+        return pg(dsn)
+
+    store = PostgresSettingsStore("postgresql://u:p@ep-pooler.neon.tech/db", "local",
+                                  connect=connect, migrate_dsn="postgresql://u:p@ep.neon.tech/db")
+    store.latest()
+    store.latest()
+    # Direct once for the table, then one pooled connection kept for queries.
+    assert seen == ["direct", "pooled"]
+    assert sum(sql.startswith("CREATE TABLE") for sql, _ in pg.sql) == 1
+
+
+def test_a_bad_database_url_stops_startup(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEASH_SETTINGS_DATABASE_URL", "postgresql://u:p@ep-x.neon.tech/db?sslmode=disable")
+    with pytest.raises(SystemExit):
+        store_from_env(str(tmp_path / "a.db"))
+
+
+def test_missing_driver_stops_startup_instead_of_losing_limits(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEASH_SETTINGS_DATABASE_URL", "postgresql://u:p@ep-x.neon.tech/db")
+    monkeypatch.setitem(sys.modules, "psycopg", None)
+    with pytest.raises(SystemExit, match="postgres"):
+        store_from_env(str(tmp_path / "a.db"))
+
+
+class FakePg:
+    """Records SQL; answers the queries PostgresSettingsStore makes."""
+
+    def __init__(self, fail=False):
+        self.sql, self.rows, self.fail = [], [], fail
+        self.opened = self.close_calls = 0
+        self.closed = False
+        self.drop_next = False
+
+    def __call__(self, dsn):
+        if self.fail:
+            raise ConnectionError("no route to host")
+        self.opened += 1
+        self.closed = False
+        return self
+
+    @contextmanager
+    def transaction(self):
+        yield
+
+    def close(self):
+        self.close_calls += 1
+        self.closed = True
+
+    def execute(self, sql, params=()):
+        if self.fail or self.drop_next:
+            self.drop_next = False
+            raise ConnectionError("server closed the connection unexpectedly")
+        sql = " ".join(sql.split())
+        self.sql.append((sql, params))
+        self._result = []
+        if sql.startswith("INSERT"):
+            self.rows.append((len(self.rows) + 1, *params))
+            self._result = [(len(self.rows),)]
+        elif sql.startswith("SELECT version, values_json"):
+            mine = [r for r in self.rows if r[1] == params[0]]
+            self._result = [(r[0], r[2]) for r in mine[-1:]]
+        elif sql.startswith("SELECT version, changes_json"):
+            mine = [r for r in self.rows if r[1] == params[0]][::-1][: params[1]]
+            self._result = [(r[0], r[3], r[4], r[5]) for r in mine]
+        return self
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return self._result
+
+
+def test_postgres_store_keeps_each_copy_of_leash_apart():
+    pg = FakePg()
+    local = PostgresSettingsStore("postgresql://u:p@h.neon.tech/db", "local", connect=pg)
+    render = PostgresSettingsStore("postgresql://u:p@h.neon.tech/db", "render", connect=pg)
+    LiveSettings(FILE_POLICY, local).change({"daily_budget_usd": 30}, changed_by="human")
+    assert LiveSettings(FILE_POLICY, local, ttl=0).policy()["daily_budget_usd"] == 30
+    assert LiveSettings(FILE_POLICY, render, ttl=0).policy()["daily_budget_usd"] == 60
+    assert local.history()[0]["changes"] == {"daily_budget_usd": {"from": 60, "to": 30}}
+    assert render.history() == []
+    # Every query is parameterised and scoped to the namespace.
+    reads = [p for sql, p in pg.sql if sql.startswith("SELECT")]
+    assert reads and all(p[0] in {"local", "render"} for p in reads)
+    creates = [sql for sql, _ in pg.sql if sql.startswith("CREATE TABLE")]
+    assert len(creates) == 2  # once per store object, not per query
+    # Each store keeps one connection for its queries, plus one to set up the
+    # table: 2 stores -> 4 connections, however many queries ran.
+    assert pg.opened == 4
+
+
+def test_postgres_store_reconnects_once_for_a_read_but_never_retries_a_write():
+    pg = FakePg()
+    store = PostgresSettingsStore("postgresql://u:p@h.neon.tech/db", "local", connect=pg)
+    store.latest()
+    pg.drop_next = True  # Neon suspended the idle database
+    assert store.latest() is None
+    pg.drop_next = True
+    with pytest.raises(ConnectionError):
+        store.save(CURRENT, {}, "human")
+    assert not [sql for sql, _ in pg.sql if sql.startswith("INSERT")]
+    store.close()
+    assert pg.closed
+
+
+class SlowStore(SqliteSettingsStore):
+    """A network store: reads are counted and can be held back."""
+
+    slow = True
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.reads, self.gate = 0, threading.Event()
+        self.gate.set()
+
+    def latest(self):
+        self.reads += 1
+        self.gate.wait(5)
+        return super().latest()
+
+
+def test_a_slow_store_never_makes_a_decision_wait(tmp_path):
+    store = SlowStore(str(tmp_path / "s.db"))
+    writer = LiveSettings(FILE_POLICY, SqliteSettingsStore(str(tmp_path / "s.db")))
+    live = LiveSettings(FILE_POLICY, store, ttl=0)
+    assert live.policy()["daily_budget_usd"] == 60       # first read waits
+    writer.change({"daily_budget_usd": 30}, changed_by="human")
+    store.gate.clear()                                    # the network is now slow
+    started = time.monotonic()
+    assert live.policy()["daily_budget_usd"] == 60       # stale copy, at once
+    assert time.monotonic() - started < 0.5
+    store.gate.set()
+    for _ in range(50):                                   # the refresh lands
+        if live.policy()["daily_budget_usd"] == 30:
+            break
+        time.sleep(0.02)
+    assert live.policy()["daily_budget_usd"] == 30
+
+
+def test_a_save_applies_at_once_without_another_read(tmp_path):
+    store = SlowStore(str(tmp_path / "s.db"))
+    live = LiveSettings(FILE_POLICY, store, ttl=60)
+    live.policy()
+    reads = store.reads
+    assert live.change({"daily_budget_usd": 30}, changed_by="human")["ok"]
+    assert store.reads == reads + 1                       # the check before saving
+    assert live.policy()["daily_budget_usd"] == 30 and store.reads == reads + 1
+
+
+def test_postgres_outage_keeps_limits_and_refuses_changes():
+    pg = FakePg()
+    store = PostgresSettingsStore("postgresql://u:p@h.neon.tech/db", "local", connect=pg)
+    live = LiveSettings(FILE_POLICY, store, ttl=0)
+    live.change({"daily_budget_usd": 30}, changed_by="human")
+    pg.fail = True
+    assert live.policy()["daily_budget_usd"] == 30
+    assert live.change({"daily_budget_usd": 25}, changed_by="human")["reason"] == (
+        "settings_store_unavailable")
+
+
+def test_a_failed_write_is_reported_not_raised(tmp_path):
+    class ReadOnly(SqliteSettingsStore):
+        def save(self, *args):
+            raise ConnectionError("read-only replica")
+
+    live = LiveSettings(FILE_POLICY, ReadOnly(str(tmp_path / "s.db")))
+    assert live.change({"daily_budget_usd": 30}, changed_by="human") == {
+        "ok": False, "reason": "settings_store_unavailable"}
+
+
+@pytest.mark.skipif(not os.getenv("LEASH_TEST_POSTGRES_URL"), reason="needs LEASH_TEST_POSTGRES_URL")
+def test_real_postgres_round_trip():
+    import psycopg
+
+    namespace = f"pytest-{uuid.uuid4()}"
+    store = PostgresSettingsStore(
+        os.environ["LEASH_TEST_POSTGRES_URL"], namespace,
+        migrate_dsn=os.getenv("LEASH_TEST_POSTGRES_URL_UNPOOLED") or None,
+    )
+    try:
+        live = LiveSettings(FILE_POLICY, store, ttl=0)
+        assert live.policy()["daily_budget_usd"] == 60
+        assert live.change({"daily_budget_usd": 30}, changed_by="pytest")["version"] >= 1
+        # A fresh object, as after a Render restart, still sees it.
+        again = LiveSettings(
+            FILE_POLICY, PostgresSettingsStore(store.dsn, namespace, migrate_dsn=store.migrate_dsn),
+            ttl=0,
+        )
+        assert again.policy()["daily_budget_usd"] == 30
+        assert again.store.history()[0]["changed_by"] == "pytest"
+    finally:
+        with psycopg.connect(store.migrate_dsn) as connection:
+            connection.execute(f"DELETE FROM {store.TABLE} WHERE namespace = %s", (namespace,))

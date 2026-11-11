@@ -25,6 +25,10 @@ kernel = [
     "kernel",
     "playwright>=1.44",
 ]
+# Keeps dashboard limit changes in a hosted Postgres (e.g. Neon's free tier).
+postgres = [
+    "psycopg[binary]>=3.1",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

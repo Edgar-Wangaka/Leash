@@ -12,7 +12,7 @@ services:
     #   disk: {name: leash-data, mountPath: /var/data, sizeGB: 1}
     #   LEASH_DB_PATH=/var/data/leash.db  PAYOUTS_DB_PATH=/var/data/payouts.db
     plan: free
-    buildCommand: pip install ".[remote]"
+    buildCommand: pip install ".[remote,postgres]"
     startCommand: python -m leash.remote
     healthCheckPath: /healthz
     envVars:
@@ -40,3 +40,7 @@ services:
         sync: false
       - key: KERNEL_API_KEY
         sync: false
+      - key: LEASH_SETTINGS_DATABASE_URL
+        sync: false          # free Neon Postgres; keeps dashboard limit changes across restarts
+      - key: LEASH_SETTINGS_NAMESPACE
+        value: render        # fixed, so changing LEASH_PUBLIC_HOST keeps the limits
