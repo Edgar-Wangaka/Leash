@@ -108,6 +108,12 @@ compares the amount with the live price:
 - If the request pays a different seller than the one the catalog lists for
   the product, it is blocked.
 - If no product is named at all, the request waits for a human.
+- If the amount is more than 25% above the product's own median price over the
+  last 30 days (Channel3 price history), the request waits for a human. A
+  seller can raise a listing to match what a fooled agent asks for, and the
+  live-price check alone would then pass. Products with fewer than 7 days of
+  history skip this check. `price_spike_pct` and `price_history_min_points` in
+  `config/policy.json` change the 25% and the 7.
 
 The dashboard shows the retailer and live price that Channel3 returned next
 to each request. Two settings in `config/policy.json` control the check:

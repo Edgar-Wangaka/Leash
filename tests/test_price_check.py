@@ -197,7 +197,8 @@ def test_lookup_reads_the_cheapest_in_stock_price_from_channel3():
         )
 
     result = lookup_product(
-        "prod_1", api_key="test-key", allowlist=SELLERS, http_client=channel3(handler)
+        "prod_1", api_key="test-key", allowlist=SELLERS, http_client=channel3(handler),
+        with_history=False,
     )
 
     assert result == {

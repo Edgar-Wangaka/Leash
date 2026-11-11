@@ -83,6 +83,14 @@ def explain(decision: dict[str, Any]) -> str:
         waiting.append(f"{amount} is at or above the {threshold} approval threshold")
     if "price_unverified" in reasons:
         waiting.append("Channel3 could not confirm the price of this product")
+    if "price_spike" in reasons:
+        history = catalog.get("history") or {}
+        pct = policy.get("price_spike_pct", 25)
+        waiting.append(
+            f"{amount} is more than {pct}% above this product's usual price "
+            f"({_money(history.get('median_usd'))}, the median of the last "
+            f"{history.get('days', 30)} days on Channel3)"
+        )
     if "llm_suspicious" in reasons:
         waiting.append("the AI risk check flagged the request")
     if not waiting:

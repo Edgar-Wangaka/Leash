@@ -302,6 +302,15 @@ components:
         merchant_email: { type: string }
         price_usd: { type: string }
         error: { type: string }
+        history:
+          type: object
+          description: The product's price over the last 30 days, from Channel3 price history.
+          properties:
+            status: { type: string, enum: [ok, unavailable] }
+            median_usd: { type: [string, "null"], description: Median daily price; null with no history. }
+            points: { type: integer, description: Number of daily prices behind the median. }
+            days: { type: integer }
+            error: { type: string }
 
     Decision:
       type: object
@@ -317,7 +326,7 @@ components:
         reasons:
           type: array
           items: { type: string }
-          description: Rules that fired, e.g. cap, allowlist, approval_threshold, price_mismatch.
+          description: Rules that fired, e.g. cap, allowlist, approval_threshold, price_mismatch, price_spike.
         status:
           type: string
           examples: [pending, blocked, paying, submitted, paid, failed, denied, expired]

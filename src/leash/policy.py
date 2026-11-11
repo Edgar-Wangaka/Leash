@@ -24,7 +24,36 @@ RULE_NAMES = (
     "price_mismatch",
     "price_unverified",
     "payee_mismatch",
+    "price_spike",
 )
+
+# The price-history check (see price_spike_reference). Policy keys override.
+DEFAULT_PRICE_SPIKE_PCT = 25
+DEFAULT_PRICE_HISTORY_MIN_POINTS = 7
+
+
+def price_spike_reference(
+    catalog: Mapping[str, Any] | None, policy: Mapping[str, Any]
+) -> Decimal | None:
+    """The most a product normally costs, from its 30-day median, or None.
+
+    None when there is no usable history: fewer than price_history_min_points
+    daily prices says too little about what is normal.
+    """
+    history = (catalog or {}).get("history") or {}
+    if history.get("status") != "ok" or not history.get("median_usd"):
+        return None
+    min_points = int(policy.get("price_history_min_points", DEFAULT_PRICE_HISTORY_MIN_POINTS))
+    if int(history.get("points") or 0) < min_points:
+        return None
+    try:
+        median_usd = Decimal(str(history["median_usd"]))
+    except (InvalidOperation, ValueError):
+        return None
+    if not median_usd.is_finite() or median_usd <= 0:
+        return None
+    pct = Decimal(str(policy.get("price_spike_pct", DEFAULT_PRICE_SPIKE_PCT)))
+    return median_usd * (Decimal(1) + pct / Decimal(100))
 
 
 @dataclass(frozen=True)
@@ -117,6 +146,12 @@ def evaluate(request: PaymentRequest, state: Mapping[str, Any]) -> Decision:
         seller = catalog.get("merchant_email")
         if seller and request.merchant_email.lower() != str(seller).lower():
             reasons.append("payee_mismatch")
+        # A price can match the catalog and still be wrong: a seller can raise
+        # the listing to match what a fooled agent asks for. Paying far above
+        # the product's own 30-day median waits for a human.
+        usual_ceiling = price_spike_reference(catalog, policy)
+        if usual_ceiling is not None and amount > usual_ceiling:
+            reasons.append("price_spike")
     elif catalog:
         reasons.append("price_unverified")
     elif state.get("catalog_configured") and policy.get("require_catalog_product", True):
@@ -137,7 +172,7 @@ def evaluate(request: PaymentRequest, state: Mapping[str, Any]) -> Decision:
     }
     if any(reason in blocking_rules for reason in reasons):
         verdict = "block"
-    elif "approval_threshold" in reasons or "price_unverified" in reasons:
+    elif {"approval_threshold", "price_unverified", "price_spike"} & set(reasons):
         verdict = "hold_for_human"
     else:
         verdict = "allow"

@@ -12,6 +12,8 @@
     "demo-legitimate-task",
     "demo-review-task"
   ],
+  "price_spike_pct": 25,
+  "price_history_min_points": 7,
   "editable_limits": {
     "per_transaction_cap_usd": {
       "max": 500

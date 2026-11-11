@@ -182,9 +182,12 @@
     const c = d.catalog;
     if (!c) return null;
     if (c.status !== "ok") return el("div", "catalog bad", "Channel3 could not confirm the price");
-    const over = d.reasons.includes("price_mismatch");
+    const over = d.reasons.includes("price_mismatch") || d.reasons.includes("price_spike");
+    const h = c.history;
+    const usual = h && h.status === "ok" && h.median_usd
+      ? " (usually " + money(h.median_usd) + ", " + h.days + "-day median)" : "";
     return el("div", "catalog" + (over ? " bad" : ""),
-      "Channel3 lists it at " + money(c.price_usd) + " from " + c.sold_by);
+      "Channel3 lists it at " + money(c.price_usd) + " from " + c.sold_by + usual);
   }
 
   function outcome(d) {
