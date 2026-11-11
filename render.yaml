@@ -34,8 +34,6 @@ services:
         value: https://api-m.sandbox.paypal.com
       - key: CHANNEL3_API_KEY
         sync: false
-      - key: ZAPIER_HOOK_URL
-        sync: false
       - key: ELASTIC_URL
         sync: false
       - key: ELASTIC_API_KEY

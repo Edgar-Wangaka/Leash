@@ -213,28 +213,6 @@ The scripted shopping agent and the LLM agent can take the same browser
 `browse_page` tool. Whatever a page says, the price and seller checks in the
 gate still decide.
 
-## Get told when a payment is held (Zapier)
-
-Set `ZAPIER_HOOK_URL` to a Zapier **Webhooks by Zapier → Catch Hook** URL.
-Leash then posts every held and blocked decision to it as flat fields:
-`event`, `amount_usd`, `seller`, `agent`, `item`, `reasons`, `is_attack`,
-`attack_reasons`, `channel3_price_usd`, `channel3_sold_by`, `explanation` and
-`dashboard_url` (the dashboard link, never the token). Set
-`ZAPIER_ALL_EVENTS=true` to send every event, for an audit-log sheet.
-
-Suggested Zaps:
-
-- **Held → Slack, SMS or Gmail.** Filter `event` = `decision.held`. Message:
-  "Agent wants ${{amount_usd}} for {{item}}. Review: {{dashboard_url}}".
-- **Attack → high-priority alert.** Filter `is_attack` = true.
-- **Everything → Google Sheets row**, with `ZAPIER_ALL_EVENTS=true`.
-
-There is deliberately no Zap that approves a payment. That would be a second
-way to approve that skips the dashboard token.
-
-Zapier only gets a copy after the decision is stored. If Zapier is down or
-slow, payments are decided exactly as before.
-
 ## Policy
 
 The limits live in `config/policy.json`: per-payment cap, daily budget,

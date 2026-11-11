@@ -141,7 +141,7 @@ def test_cloud_id_decodes_to_the_es_url():
 
 
 def test_from_env_needs_a_url_and_a_key(monkeypatch):
-    for name in ("ZAPIER_HOOK_URL", "ELASTIC_URL", "ELASTIC_CLOUD_ID", "ELASTIC_API_KEY"):
+    for name in ("ELASTIC_URL", "ELASTIC_CLOUD_ID", "ELASTIC_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ELASTIC_URL", URL)
     assert sinks.from_env() == []

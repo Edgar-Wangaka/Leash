@@ -32,81 +32,6 @@ def _env(name: str) -> str | None:
     return value or None
 
 
-def dashboard_url() -> str | None:
-    """Link to the dashboard for a human. It never carries the token."""
-    hosts = [h.strip() for h in os.getenv("LEASH_PUBLIC_HOST", "").split(",") if h.strip()]
-    if hosts:
-        return f"https://{hosts[0]}/"
-    return None
-
-
-# --- Zapier --------------------------------------------------------------------
-
-class ZapierSink:
-    """POST held and blocked decisions to a Zapier "Catch Hook" URL.
-
-    The body is flat so each field maps straight onto a Zap step (Slack, SMS,
-    Gmail, Sheets). Set ZAPIER_ALL_EVENTS=true to send every event, e.g. for
-    an audit-log sheet.
-    """
-
-    DEFAULT_KINDS = {"decision.held", "decision.blocked"}
-
-    def __init__(
-        self,
-        hook_url: str,
-        *,
-        kinds: set[str] | None = None,
-        http_client: httpx.Client | None = None,
-        dashboard: str | None = None,
-    ) -> None:
-        if not hook_url.startswith("https://"):
-            raise ValueError("ZAPIER_HOOK_URL must be an https:// URL")
-        self.hook_url = hook_url
-        self.kinds = kinds  # None means every kind
-        self._client = http_client
-        self.dashboard = dashboard
-        self.__name__ = "zapier"
-
-    @staticmethod
-    def flatten(payload: dict[str, Any], dashboard: str | None) -> dict[str, Any]:
-        catalog = payload.get("catalog") or {}
-        reasons = list(payload.get("reasons") or [])
-        attack = sorted(ATTACK_REASONS.intersection(reasons))
-        return {
-            "event": payload.get("event"),
-            "request_id": payload["request_id"],
-            "agent": payload.get("agent_id"),
-            "seller": payload.get("merchant_email"),
-            "amount_usd": payload.get("amount_usd"),
-            "item": payload.get("reason"),
-            "verdict": payload.get("verdict"),
-            "status": payload.get("status"),
-            "reasons": ", ".join(reasons),
-            "is_attack": bool(attack),
-            "attack_reasons": ", ".join(attack),
-            "explanation": payload.get("explanation"),
-            "channel3_status": catalog.get("status"),
-            "channel3_price_usd": catalog.get("price_usd"),
-            "channel3_product": catalog.get("name"),
-            "channel3_sold_by": catalog.get("sold_by"),
-            "created_at": payload.get("created_at"),
-            "dashboard_url": dashboard,
-        }
-
-    def __call__(self, kind: str, payload: dict[str, Any]) -> None:
-        if self.kinds is not None and kind not in self.kinds:
-            return
-        body = self.flatten(payload, self.dashboard)
-        client = self._client or httpx.Client()
-        try:
-            response = client.post(self.hook_url, json=body, timeout=SINK_TIMEOUT_SECONDS)
-            response.raise_for_status()
-        finally:
-            if self._client is None:
-                client.close()
-
-
 # --- Elastic -------------------------------------------------------------------
 
 def elastic_url_from_cloud_id(cloud_id: str) -> str:
@@ -197,18 +122,6 @@ class ElasticSink:
 def from_env() -> list[tuple[str, Sink]]:
     """Build every sink whose configuration is present in the environment."""
     built: list[tuple[str, Sink]] = []
-
-    hook = _env("ZAPIER_HOOK_URL")
-    if hook:
-        try:
-            all_events = (_env("ZAPIER_ALL_EVENTS") or "").lower() in {"1", "true", "yes"}
-            built.append(("zapier", ZapierSink(
-                hook,
-                kinds=None if all_events else ZapierSink.DEFAULT_KINDS,
-                dashboard=dashboard_url(),
-            )))
-        except ValueError as error:
-            logger.warning("Zapier sink not started: %s", error)
 
     elastic_url = _env("ELASTIC_URL")
     cloud_id = _env("ELASTIC_CLOUD_ID")
