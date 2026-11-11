@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 
@@ -58,7 +59,16 @@ def normalize_channel3_product(
         "merchant_email": sandbox_seller_for(offer.get("domain", ""), allowlist),
         "amount_usd": f"{offer['price']['price']:.2f}",
         "channel3_product_id": product.get("id"),
+        # The retailer's product page for that offer, for an agent to open.
+        # Untrusted like the rest of the listing; only http(s) is kept.
+        "url": _page_url(offer.get("url")),
     }
+
+
+def _page_url(value: Any) -> str | None:
+    if isinstance(value, str) and urlparse(value).scheme in {"http", "https"}:
+        return value
+    return None
 
 
 def unavailable(error: str) -> dict[str, Any]:

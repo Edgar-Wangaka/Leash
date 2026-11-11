@@ -214,6 +214,8 @@ def _kernel_html(
             page = context.pages[0] if context.pages else context.new_page()
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             content = page.content()
+            # Where the page ended up after redirects (Channel3 links redirect).
+            info["final_url"] = page.url
             if hold:
                 page.wait_for_timeout(hold * 1000)
             browser.close()

@@ -219,6 +219,18 @@ session is deleted when the demo ends, and the link stops working. Wake a
 free Render instance first with `curl https://leash-1pqh.onrender.com/healthz`.
 Without a key, the page is rendered locally.
 
+To open a real retailer page instead, run `--real`. It takes a Channel3
+search result (needs `CHANNEL3_API_KEY`), opens its product page, and reports
+where it landed, how much text was visible and hidden, whether the catalog
+price is on the page, and whether the hidden text holds a payment instruction.
+It never asks Leash to pay. Some retailers block automated browsers; `--real`
+skips those (up to 3 tries) rather than trying to get past them. Channel3
+links are affiliate redirects, so each open counts as a click.
+
+```bash
+.venv/bin/python -m leash.demo_injection --real
+```
+
 The scripted shopping agent and the LLM agent can take the same browser
 (`ShoppingAgent(..., browse_fn=browse_page)`); the LLM agent then gets a
 `browse_page` tool. Whatever a page says, the price and seller checks in the

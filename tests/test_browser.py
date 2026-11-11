@@ -14,7 +14,7 @@ import pytest
 from leash import browser
 from leash.agent import ProductSearcher, ShoppingAgent
 from leash.dashboard import make_handler
-from leash.demo_injection import NeverPay, obey, run_live
+from leash.demo_injection import NeverPay, is_planted, looks_blocked, obey, price_on_page, run_live, run_real
 from leash.demo_injection import main as demo_main
 from leash.gate import PaymentGate
 
@@ -175,6 +175,8 @@ class _FakeKernelSDK:
                 self.browsers = Browsers()
 
         class Page:
+            url = "https://retailer.example/p/1"
+
             def goto(self, url, **kwargs):
                 sdk.calls.append(("goto", url))
                 if sdk.fail_on_goto:
@@ -355,3 +357,122 @@ def test_live_demo_is_hijacked_and_blocked(tmp_path, monkeypatch):
     assert result["record"]["verdict"] == "block"
     assert "allowlist" in result["record"]["reasons"]
     assert payout.calls == 0
+
+
+
+# --- phase 4: real retailer pages ----------------------------------------------
+
+REAL = [
+    {"name": "Blocked Bear", "sold_by": "blocked.example", "amount_usd": "12.00",
+     "url": "https://buy.trychannel3.com/1"},
+    {"name": "Second Bear", "sold_by": "blocked.example", "amount_usd": "13.00",
+     "url": "https://buy.trychannel3.com/2"},
+    {"name": "Broken Bear", "sold_by": "broken.example", "amount_usd": "14.00",
+     "url": "https://buy.trychannel3.com/3"},
+    {"name": "Good Bear", "sold_by": "good.example", "amount_usd": "15.99",
+     "url": "https://buy.trychannel3.com/4"},
+]
+
+
+class _Channel3Searcher:
+    last_source = "channel3"
+
+    def __init__(self, products):
+        self.products = products
+
+    def search(self, query, **kwargs):
+        return self.products
+
+
+def _pages(url):
+    if url.endswith("/1"):
+        return {"ok": True, "visible_text": "Access Denied. You don't have permission.", "hidden_text": ""}
+    if url.endswith("/3"):
+        return {"ok": False, "error": "TimeoutError"}
+    return {"ok": True, "engine": "kernel", "final_url": "https://good.example/bear",
+            "visible_text": "Menu " * 400 + "Good Bear $15.99 Add to cart", "hidden_text": "menu"}
+
+
+def test_planted_listing_is_told_apart_from_real_pages():
+    assert is_planted({"url": "https://leash.example.com/demo/listing/x"})
+    assert not is_planted({"url": "https://buy.trychannel3.com/x"})
+    assert not is_planted({})
+
+
+def test_live_demo_opens_the_planted_page_even_after_real_results(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEASH_DEMO_BASE_URL", "https://leash.example.com")
+    opened = []
+    planted = ProductSearcher(api_key="")._planted()
+    searcher = _Channel3Searcher(REAL + planted)
+
+    def browse(url):
+        opened.append(url)
+        return browser.browse_page(url)
+
+    with make_gate(tmp_path) as gate:
+        result = run_live(gate, searcher=searcher, browse=browse)
+
+    assert opened == [planted[0]["url"]]
+    assert result["record"]["verdict"] == "block"
+
+
+def test_real_page_check_skips_blocked_and_broken_retailers():
+    opened = []
+
+    def browse(url):
+        opened.append(url)
+        return _pages(url)
+
+    result = run_real(searcher=_Channel3Searcher(REAL), browse=browse)
+
+    assert result["ok"] and result["product"]["name"] == "Good Bear"
+    # One try per retailer: the second blocked.example listing is not opened.
+    assert opened == ["https://buy.trychannel3.com/1", "https://buy.trychannel3.com/3",
+                      "https://buy.trychannel3.com/4"]
+    assert result["skipped"] == [
+        {"retailer": "blocked.example", "reason": "blocked automated browsing"},
+        {"retailer": "broken.example", "reason": "TimeoutError"},
+    ]
+    assert result["price_on_page"] is True
+    assert result["instruction"] is None
+
+
+def test_real_page_check_gives_up_after_max_tries():
+    result = run_real(searcher=_Channel3Searcher(REAL), browse=_pages, max_tries=2)
+    assert not result["ok"] and len(result["skipped"]) == 2
+
+
+def test_real_page_check_needs_channel3(monkeypatch):
+    monkeypatch.delenv("CHANNEL3_API_KEY", raising=False)
+    result = run_real(searcher=ProductSearcher(api_key=""), browse=_pages)
+    assert not result["ok"] and "CHANNEL3_API_KEY" in result["error"]
+
+
+def test_real_page_check_never_pays(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("leash.demo_injection.run_real",
+                        lambda browse: run_real(searcher=_Channel3Searcher(REAL), browse=_pages))
+    monkeypatch.setattr(PaymentGate, "process", lambda *a, **k: pytest.fail("--real must not pay"))
+
+    assert demo_main(["--real"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Skipped blocked.example: blocked automated browsing" in out
+    assert "Landed on: good.example" in out
+    assert "Catalog price $15.99 shown on the page: yes" in out
+    assert "Payment instruction in hidden text: none" in out
+    assert "No payment was requested." in out
+
+
+def test_blocked_page_detection():
+    assert looks_blocked({"ok": False})
+    assert looks_blocked({"ok": True, "visible_text": "Access Denied"})
+    assert not looks_blocked({"ok": True, "visible_text": "x" * 2000 + " captcha"})
+    assert not looks_blocked({"ok": True, "visible_text": "A nice bear"})
+
+
+def test_price_on_page_matches_common_formats():
+    assert price_on_page("15.99", "now $15.99")
+    assert price_on_page("1299.00", "$1,299.00")
+    assert price_on_page("50.00", "only $50 today")
+    assert not price_on_page("15.99", "$16.99")
+    assert not price_on_page(None, "$15.99")
