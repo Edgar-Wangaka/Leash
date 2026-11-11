@@ -215,6 +215,29 @@ npx newman run postman/leash.postman_collection.json -e postman/render.postman_e
 
 CI runs the same collection against a dry-run dashboard on every push.
 
+## Ask the agent (on the dashboard)
+
+The dashboard has a box where you type what an AI agent should buy. A real
+model shops with three tools (search_products on Channel3, browse_page,
+request_payment), and Leash decides every payment it asks for. The page shows
+each step: what it searched, which page it opened (and any hidden text on it),
+what it asked Leash to pay, and Leash's verdict. Anything held appears under
+"Waiting for your approval".
+
+- **Model:** Google Gemini's free tier. Set `GEMINI_API_KEY` (from
+  aistudio.google.com); the default model is `gemini-flash-lite-latest`
+  (`LEASH_AGENT_MODEL` changes it). Any OpenAI-compatible model works through
+  `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`. With no model set, a
+  rule-based agent runs instead and says so.
+- **What the agent can't do:** it has no approve tool and can't change a
+  limit. It can only open pages that appeared in its own search results, so
+  a prompt can't make the server fetch other addresses.
+- **Limits per run:** a 300-character task, 6 model turns, and 2 payment
+  requests. Overall: 3 runs a minute and 150 a day, counted in the database.
+- **The "Hijacked agent (no AI)" button** runs the injection demo with no
+  model. A naive agent opens a booby-trapped listing, obeys its hidden text,
+  and asks to pay $500 to an unknown seller. Leash blocks it.
+
 ## Watch an agent get hijacked in a real browser (KERNEL)
 
 The planted listing is also a real product page, served by the dashboard at

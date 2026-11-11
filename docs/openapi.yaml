@@ -209,6 +209,60 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/agent/run:
+    post:
+      tags: [testing]
+      operationId: runAgent
+      summary: Ask an AI shopping agent to buy something; Leash decides each payment
+      description: |
+        A model (Gemini by default, or any OpenAI-compatible model) shops with
+        search_products, browse_page and request_payment. Every payment it asks
+        for goes through the same rules as any agent's. Returns each step and
+        each decision. Limits: 300-character task, 6 model turns, 2 payments
+        per run, 3 runs a minute and 150 a day. With no model configured, a
+        rule-based agent runs instead.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [task]
+              properties:
+                task: { type: string, maxLength: 300 }
+      responses:
+        "200":
+          description: The run. `ok` is false with an `error` when the task, the caps or the model stopped it.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  mode: { type: string }
+                  model: { type: [string, "null"] }
+                  steps: { type: array, items: { type: object } }
+                  decisions: { type: array, items: { type: object } }
+                  answer: { type: string }
+                  error: { type: string }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/agent/hijack:
+    post:
+      tags: [testing]
+      operationId: runHijackDemo
+      summary: A naive agent obeys a hidden instruction on a product page; Leash's answer
+      description: No model needed. Returns the hidden text, the payment the agent asked for, and Leash's decision.
+      responses:
+        "200":
+          description: The demo run.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
   /webhooks/channel3:
     post:
       tags: [settings]
@@ -378,7 +432,7 @@ components:
         risk_signal: { type: string }
         approved_by: { type: [string, "null"] }
         paypal_batch_id: { type: [string, "null"] }
-        paypal_transaction_id: { type: [string, "null"], description: PayPal's transaction ID for the payout item, once PayPal has processed it. }
+        paypal_transaction_id: { type: [string, "null"], description: "PayPal's transaction ID for the payout item, once PayPal has processed it." }
         paypal_status: { type: [string, "null"], description: "PayPal's own status for the payout, e.g. PENDING, SUCCESS, UNCLAIMED." }
         paypal_time_processed: { type: [string, "null"], format: date-time }
         error_name: { type: [string, "null"] }
@@ -465,6 +519,12 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Decision" }
         settings: { $ref: "#/components/schemas/Settings" }
+        agent:
+          type: object
+          description: Which model the Ask-the-agent box uses (never the key).
+          properties:
+            mode: { type: string, examples: [gemini, openai-compatible, rule-based] }
+            model: { type: [string, "null"] }
         price_alerts:
           type: object
           description: |

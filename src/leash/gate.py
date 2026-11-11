@@ -469,6 +469,20 @@ class PaymentGate:
                     alerts[request_id] = latest
         return alerts
 
+    def record_agent_run(self, at: datetime) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO agent_runs (started_at) VALUES (?)",
+                (at.astimezone(timezone.utc).isoformat(),),
+            )
+
+    def count_agent_runs(self, since: datetime) -> int:
+        with self._connect() as connection:
+            return int(connection.execute(
+                "SELECT COUNT(*) FROM agent_runs WHERE started_at >= ?",
+                (since.astimezone(timezone.utc).isoformat(),),
+            ).fetchone()[0])
+
     def has_pending_hold_for(self, product_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -742,6 +756,10 @@ class PaymentGate:
                 "CREATE INDEX IF NOT EXISTS idx_price_events_product "
                 "ON price_events(product_id, event_time)"
             )
+            # One row per "Ask the agent" run, for the per-minute and daily caps.
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS agent_runs (started_at TEXT NOT NULL)"
+            )
 
     def _initialize_postgres(self) -> None:
         """The same tables in Postgres. seq stands in for SQLite's rowid."""
@@ -792,6 +810,10 @@ class PaymentGate:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_price_events_product "
                 "ON price_events(product_id, event_time)"
+            )
+            # One row per "Ask the agent" run, for the per-minute and daily caps.
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS agent_runs (started_at TEXT NOT NULL)"
             )
 
     def _insert_decision(

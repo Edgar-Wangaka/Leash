@@ -27,7 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import browser, config, events, price_watch, settings
+from . import browser, config, events, price_watch, settings, web_agent
 from .catalog import price_lookup_from_env
 from .db import database_from_env
 from .events import public_record
@@ -84,7 +84,16 @@ def build_state(gate: PaymentGate) -> dict[str, Any]:
         "settings": settings_state(gate),
         # Channel3 price or stock changes since a waiting request was made.
         "price_alerts": gate.price_alerts(),
+        "agent": agent_info(),
     }
+
+
+def agent_info() -> dict[str, Any]:
+    """Which model the Ask-the-agent box uses. Never the key."""
+    model = web_agent.model_from_env()
+    if model is None:
+        return {"mode": "rule-based", "model": None}
+    return {"mode": model["provider"], "model": model["model"]}
 
 
 def settings_state(gate: PaymentGate) -> dict[str, Any]:
@@ -291,6 +300,13 @@ def make_handler(
                     else 503 if result["reason"] == "settings_store_unavailable" else 400
                 )
                 self._json(code, result)
+                return
+            elif self.path == "/api/agent/run":
+                # The "Ask the agent" box: a real model shops, Leash decides.
+                self._json(200, web_agent.WebAgent(gate).run(str(body.get("task", ""))))
+                return
+            elif self.path == "/api/agent/hijack":
+                self._json(200, web_agent.run_hijack(gate))
                 return
             elif self.path == "/api/simulate" and body.get("scenario") in SCENARIOS:
                 self._json(200, {"ok": True, "record": simulate(gate, body["scenario"])})
