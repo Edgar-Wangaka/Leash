@@ -30,6 +30,11 @@ No token → 401 · wrong token → 401 · `Authorization: Bearer` instead of th
   - one run stays under the 5-a-minute rate limit
   - no token is committed
 
+## Fix after the first run on Render
+Your first Postman run reported 401 for every attack. Newman against Render with a fake token showed the server answering correctly: 401 for the token checks, 403 for the cross-site and form-post attacks. Two causes on the Postman side:
+- **Foreign Host can't be tested through Render.** Render's edge drops a request for a name it doesn't serve, so Postman recorded an error. The request now skips itself (`pm.execution.skipRequest()`) unless `baseUrl` is a local dashboard, where it still asserts 403. Verified with Newman: skipped on Render, 403 locally, full local run 18/18 requests and 31/31 assertions.
+- **Likely run setup.** The three attacks that need the real token returning 401 means the token wasn't sent on that run (the Runner's own environment selector). Postman on the web also can't send `Origin` or `Host` headers. Use the Desktop app for the Attacks folder.
+
 ## Design decisions
 - **The run is shaped by the live policy.** `config/policy.json` allows 5 requests a minute, so the collection sends 4 test requests. A test enforces that.
 - **"Small is paid" is asserted only when no catalog is set.** With `CHANNEL3_API_KEY` set, test requests name no product and are held, as the README says.

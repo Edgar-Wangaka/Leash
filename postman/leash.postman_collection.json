@@ -636,12 +636,26 @@
           "name": "Approve through a foreign Host (DNS rebinding)",
           "event": [
             {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A hosted deploy's edge drops a request for a name it doesn't serve before Leash sees it,",
+                  "// so this check only means something against a local dashboard.",
+                  "const base = pm.environment.get(\"baseUrl\") || pm.collectionVariables.get(\"baseUrl\") || \"\";",
+                  "if (!/^http:\\/\\/(127\\.0\\.0\\.1|localhost)(:|\\/|$)/.test(base)) {",
+                  "  console.log(\"Skipping the foreign Host check: only meaningful against a local dashboard\");",
+                  "  pm.execution.skipRequest();",
+                  "}"
+                ]
+              }
+            },
+            {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "pm.test(\"refused (403 from Leash, or the host edge refusing the name)\", () =>",
-                  "  pm.expect([403, 404, 421]).to.include(pm.response.code));"
+                  "pm.test(\"refused with 403\", () => pm.response.to.have.status(403));"
                 ]
               }
             }
