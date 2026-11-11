@@ -159,7 +159,8 @@ persistent disk.
    - `LEASH_PUBLIC_HOST`: the name people use, e.g. `leash.onrender.com` or
      your custom domain.
    - `LEASH_DASHBOARD_TOKEN`: the human's approval token (16+ characters).
-     Open `https://<host>/#token=<it>`.
+     Open `https://<host>/` and paste it into the sign-in box (or open
+     `https://<host>/#token=<it>`). It is kept in that browser tab only.
    - `LEASH_MCP_TOKEN`: the agent's token. It must differ from the dashboard
      token. The dashboard refuses it, so an agent holding it cannot approve.
    - PayPal and Channel3 keys as in `.env`.

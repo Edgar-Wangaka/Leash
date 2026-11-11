@@ -105,6 +105,17 @@
   .bench button:hover { border-color: var(--ink); color: var(--ink); }
   .bench span { font-size: 14px; font-style: italic; color: var(--muted); flex: 1 1 240px; }
   #error { color: var(--blocked); font: 13px var(--mono); min-height: 20px; margin-top: 10px; }
+  #signin { margin: 22px 0 6px; padding: 18px 20px; border: 2px solid var(--navy); background: var(--paper);
+    display: grid; gap: 10px; max-width: 560px; }
+  #signin[hidden] { display: none; }
+  #signin label { font: 700 12px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+  #signin .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  #signin input { flex: 1 1 260px; min-width: 0; font: 15px/1.4 var(--mono); padding: 9px 10px;
+    border: 1px solid var(--ink); background: transparent; color: inherit; }
+  #signin input:focus-visible { outline: 3px solid var(--blue); outline-offset: 1px; }
+  #signin p { margin: 0; font-size: 14px; color: var(--muted); }
+  #signin .bad { color: var(--blocked); font: 13px var(--mono); }
+  #signout { font-size: 11px; padding: 6px 8px; margin-left: 10px; }
 
   @keyframes ink { from { background: var(--gold); } to { background: transparent; } }
   @keyframes drop { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
@@ -123,7 +134,20 @@
     <h1>Leash</h1>
     <p>Spending limits and human approval between an AI agent and PayPal.</p>
     <span id="mode" class="down">Connecting</span>
+    <button id="signout" type="button" hidden>Sign out</button>
   </header>
+
+  <form id="signin" hidden autocomplete="on">
+    <label for="tokenInput">Dashboard token</label>
+    <div class="row">
+      <input id="tokenInput" name="password" type="password" autocomplete="current-password" required
+        spellcheck="false" placeholder="Paste your token">
+      <button class="sign" type="submit">Open dashboard</button>
+    </div>
+    <p>On Render this is <b>LEASH_DASHBOARD_TOKEN</b> from the Environment tab. On your own machine it is
+      in the link the dashboard prints when it starts. It is kept in this browser tab only.</p>
+    <div class="bad" id="signinError" role="alert"></div>
+  </form>
 
   <section class="rules" aria-label="Rules">
     <div class="rule-block">
@@ -206,8 +230,10 @@
 
   // The server prints a link with #token=... ; keep the token for this tab only
   // and take it out of the address bar.
-  const token = (() => {
-    const match = location.hash.match(/token=([A-Za-z0-9_-]+)/);
+  let token = (() => {
+    const raw = location.hash.match(/token=([^&]+)/);
+    let match = null;
+    try { match = raw && [raw[0], decodeURIComponent(raw[1])]; } catch (error) { match = raw; }
     try {
       if (match) sessionStorage.setItem("leashToken", match[1]);
       return match ? match[1] : sessionStorage.getItem("leashToken") || "";
@@ -220,6 +246,7 @@
       method: "POST", headers: { "Content-Type": "application/json", "X-Leash-Token": token },
       body: JSON.stringify(body),
     });
+    if (response.status === 401) { askForToken(true); return; }
     const result = await response.json();
     $("error").textContent = result.ok === false ? "That did not go through (" + (result.reason || result.status).replaceAll("_", " ") + ")." : "";
     await refresh();
@@ -320,11 +347,11 @@
   async function refresh() {
     try {
       // Redraw only when something changed, so a button is never replaced mid-click.
-      const response = await fetch("/api/state", { headers: { "X-Leash-Token": token } });
-      if (response.status === 401) {
-        $("mode").textContent = "Open the dashboard with the link printed in the terminal"; $("mode").className = "down";
-        lastState = ""; return;
-      }
+      const sent = token;
+      const response = await fetch("/api/state", { headers: { "X-Leash-Token": sent } });
+      if (sent !== token) return;  // the token changed while this was in flight; a newer poll answers
+      if (response.status === 401) { askForToken(Boolean(sent)); lastState = ""; return; }
+      $("signin").hidden = true; $("signout").hidden = false; $("signinError").textContent = "";
       const text = await response.text();
       if (text === lastState) return;
       lastState = text;
@@ -337,6 +364,26 @@
       lastState = ""; $("mode").textContent = "Dashboard server is not running"; $("mode").className = "down";
     }
   }
+  // No token, or a wrong one: ask for it here instead of needing a terminal.
+  function askForToken(rejected) {
+    $("mode").textContent = "Sign in with your dashboard token"; $("mode").className = "down";
+    $("signout").hidden = true;
+    const form = $("signin"), wasHidden = form.hidden;
+    form.hidden = false;
+    $("signinError").textContent = rejected ? "That token did not work. Check it and try again." : "";
+    if (wasHidden) $("tokenInput").focus();
+  }
+  $("signin").onsubmit = (event) => {
+    event.preventDefault();
+    token = $("tokenInput").value.trim();
+    try { sessionStorage.setItem("leashToken", token); } catch (error) {}
+    $("tokenInput").value = ""; $("signinError").textContent = "Checking…"; lastState = ""; refresh();
+  };
+  $("signout").onclick = () => {
+    token = "";
+    try { sessionStorage.removeItem("leashToken"); } catch (error) {}
+    lastState = ""; refresh();
+  };
   for (const button of document.querySelectorAll("[data-scenario]")) {
     button.onclick = () => post("/api/simulate", { scenario: button.dataset.scenario });
   }
