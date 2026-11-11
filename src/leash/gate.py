@@ -37,6 +37,21 @@ PAYPAL_STATUS_MAP = {
     "REVERSED": "failed",
 }
 
+# Re-sending a payout PayPal never answered (see _resend_unanswered). PayPal
+# keeps sender_batch_id and PayPal-Request-Id for 30 days; stay far inside that.
+MAX_RESENDS = 5
+RESEND_WINDOW = timedelta(days=7)
+
+
+def _payout_note(request_id: str) -> str:
+    # A resend must carry the same body as the first send.
+    return f"Leash payment {request_id[:8]}"
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 class PaymentGate:
     """Evaluate requests before allowing the PayPal client to move money."""
@@ -281,14 +296,72 @@ class PaymentGate:
             return self._result(False, record["status"], "not_reconcilable", request_id, record)
 
         batch_id = self._batch_id_for_request(request_id, record)
+        if not batch_id and record["status"] == "needs_reconcile":
+            return self._resend_unanswered(record)
         if not batch_id:
             self._set_status(request_id, "needs_reconcile")
             return self._result(False, "needs_reconcile", "batch_id_unknown", request_id)
         status = self.payout_client.get_payout_status(batch_id)
         return self._update_from_reconcile(request_id, status)
 
+    def _resend_unanswered(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Learn what happened to a send PayPal never answered, by sending it again.
+
+        PayPal has no search by sender_batch_id. Sending again with the same
+        sender_batch_id and PayPal-Request-Id (the request ID) is PayPal's
+        documented recovery: a payout that exists comes back as itself and is
+        never paid twice. PayPal only remembers those IDs for 30 days, so this
+        stops well before that. If the first send never arrived, this one pays,
+        so the hard rules are checked again first, as for an approval.
+        """
+        request_id = record["request_id"]
+        resend = getattr(self.payout_client, "resend_payout", None)
+        payout = record.get("payout") or {}
+        attempts = int(payout.get("resend_attempts") or 0)
+        reason = None
+        if resend is None:
+            reason = "batch_id_unknown"
+        elif attempts >= MAX_RESENDS:
+            reason = "resend_limit_reached"
+        elif self._now().astimezone(timezone.utc) - _parse_time(record["created_at"]) > RESEND_WINDOW:
+            reason = "too_old_to_resend"
+        else:
+            hard_reasons = self._hard_recheck(record)
+            if hard_reasons:
+                # Not rejected: the first send may have paid. A human looks.
+                reason = "resend_blocked:" + ",".join(hard_reasons)
+        if reason:
+            return self._result(False, "needs_reconcile", reason, request_id, record)
+
+        # Count the attempt before sending, so a crash mid-send still counts.
+        payout = {**payout, "resend_attempts": attempts + 1}
+        self._set_status(request_id, "needs_reconcile", payout)
+        amount = Decimal(record["amount_cents"]) / Decimal(100)
+        try:
+            answer = resend(request_id, record["merchant_email"], amount, _payout_note(request_id))
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            return self._result(False, "needs_reconcile", "resend_failed", request_id)
+
+        payout = {**payout, **answer}
+        status = str(answer.get("status") or "needs_reconcile").lower()
+        if status == "success":
+            status = "paid"
+        if status not in {"paid", "submitted", "failed", "unclaimed"}:
+            status = "needs_reconcile"
+        self._set_status(request_id, status, payout, answer.get("error_name"))
+        return self._result(
+            status in {"paid", "submitted"}, status,
+            answer.get("error_name") if status == "failed" else None, request_id,
+        )
+
     def poll_submitted(self) -> list[dict[str, Any]]:
-        """Reconcile every submitted or uncertain row without resending."""
+        """Reconcile every submitted or uncertain row.
+
+        Only a payout whose first send never answered is sent again, with
+        the same IDs; see _resend_unanswered.
+        """
         with self._connect() as connection:
             request_ids = [
                 row[0]
@@ -372,7 +445,7 @@ class PaymentGate:
 
         receiver = current["merchant_email"]
         amount = Decimal(current["amount_cents"]) / Decimal(100)
-        note = f"Leash payment {request_id[:8]}"
+        note = _payout_note(request_id)
         try:
             payout = self.payout_client.send_payout(
                 request_id, receiver, amount, note

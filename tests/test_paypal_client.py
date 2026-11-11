@@ -71,24 +71,3 @@ def test_dry_run_uses_no_network(tmp_path, monkeypatch):
     assert status["transaction_status"] == "SUCCESS"
 
 
-def test_find_payout_batch_sends_bearer_token(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
-    monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
-    monkeypatch.setenv("PAYPAL_BASE_URL", "https://paypal.test")
-    monkeypatch.delenv("DRY_RUN", raising=False)
-    seen = []
-
-    def handler(request):
-        if request.url.path == "/v1/oauth2/token":
-            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
-        seen.append(request.headers["Authorization"])
-        return httpx.Response(200, json={"items": [{"payout_batch_id": "batch-1"}]})
-
-    with PayPalClient(
-        db_path=str(tmp_path / "payouts.db"),
-        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
-    ) as client:
-        found = client.find_payout_batch("key-1")
-
-    assert seen == ["Bearer token"]
-    assert found == {"payout_batch_id": "batch-1"}

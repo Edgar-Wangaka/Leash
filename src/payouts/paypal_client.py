@@ -126,6 +126,53 @@ class PayPalClient:
             )
             return record
 
+        status, batch_id, error_name = self._post_payout(
+            idempotency_key, receiver_email, amount, note
+        )
+        return self._save_record(idempotency_key, status, batch_id, error_name)
+
+    def resend_payout(
+        self,
+        idempotency_key: str,
+        receiver_email: str,
+        amount_usd: str | Decimal | float,
+        note: str,
+    ) -> dict[str, Any]:
+        """Send the same payout again, with the same IDs, to learn what happened.
+
+        For a payout whose first send timed out or got a 5xx, so Leash never
+        learned its batch ID. PayPal's Payouts API has no search by
+        sender_batch_id; its documented recovery is to send again. It keeps
+        PayPal-Request-Id keys for 30 days and never pays a sender_batch_id
+        used in the last 30 days twice: a repeat returns the original batch,
+        or an error linking to it. If the first send never reached PayPal,
+        this one pays. The caller decides whether that is still allowed.
+        """
+        local = self._get_record(idempotency_key)
+        if local and local.get("paypal_batch_id"):
+            return local
+        amount = self._format_amount(amount_usd)
+        if self._dry_run:
+            status, batch_id, error_name = "success", f"DRY_RUN_{idempotency_key}", None
+        else:
+            status, batch_id, error_name = self._post_payout(
+                idempotency_key, receiver_email, amount, note, resending=True
+            )
+        if local is None:
+            return self._save_record(idempotency_key, status, batch_id, error_name)
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                "UPDATE payouts SET status = ?, paypal_batch_id = ?, error_name = ? "
+                "WHERE idempotency_key = ?",
+                (status, batch_id, error_name, idempotency_key),
+            )
+        return self._get_record(idempotency_key) or {}
+
+    def _post_payout(
+        self, idempotency_key: str, receiver_email: str, amount: str, note: str,
+        *, resending: bool = False,
+    ) -> tuple[str, str | None, str | None]:
+        """POST one payout. Returns (local status, batch ID, PayPal error name)."""
         payload = {
             "sender_batch_header": {"sender_batch_id": idempotency_key},
             "items": [
@@ -137,7 +184,6 @@ class PayPalClient:
                 }
             ],
         }
-
         try:
             response = self._http.post(
                 f"{self._base_url}/v1/payments/payouts",
@@ -149,25 +195,45 @@ class PayPalClient:
                 json=payload,
             )
             response.raise_for_status()
-            response_payload = response.json()
-            batch_header = response_payload.get("batch_header", {})
-            batch_id = batch_header.get("payout_batch_id")
-            status = self._local_status(batch_header.get("batch_status"))
-            return self._save_record(idempotency_key, status, batch_id, None)
-        except (httpx.TimeoutException, httpx.NetworkError) as error:
-            return self._save_record(
-                idempotency_key, "needs_reconcile", None, None
+            batch_header = response.json().get("batch_header", {})
+            return (
+                self._local_status(batch_header.get("batch_status")),
+                batch_header.get("payout_batch_id"),
+                None,
             )
+        except (httpx.TimeoutException, httpx.NetworkError):
+            return "needs_reconcile", None, None
         except httpx.HTTPStatusError as error:
-            error_name = self._error_name(error)
-            status = "needs_reconcile" if error.response.status_code >= 500 else "failed"
-            return self._save_record(
-                idempotency_key, status, None, error_name if status == "failed" else None
-            )
-        except (RuntimeError, ValueError) as error:
-            return self._save_record(
-                idempotency_key, "needs_reconcile", None, None
-            )
+            code = error.response.status_code
+            if code >= 500:
+                return "needs_reconcile", None, None
+            if resending:
+                # The sender_batch_id was used already: PayPal links to the
+                # original batch, which is the answer we were looking for.
+                original = self._linked_batch_id(error.response)
+                if original:
+                    return "submitted", original, None
+                if code in {401, 403}:
+                    return "needs_reconcile", None, None  # our credentials, not the payout
+            # A refusal of a sender_batch_id PayPal has not seen means no payout exists.
+            return "failed", None, self._error_name(error)
+        except (RuntimeError, ValueError):
+            return "needs_reconcile", None, None
+
+    @staticmethod
+    def _linked_batch_id(response: httpx.Response) -> str | None:
+        try:
+            links = response.json().get("links") or []
+        except (ValueError, AttributeError):
+            return None
+        prefix = "/v1/payments/payouts/"
+        for link in links:
+            path = httpx.URL(str(link.get("href", ""))).path if isinstance(link, dict) else ""
+            if path.startswith(prefix):
+                batch_id = path[len(prefix):].strip("/")
+                if batch_id and "/" not in batch_id:
+                    return batch_id
+        return None
 
     def get_payout_status(self, paypal_batch_id: str) -> dict[str, Any]:
         """Return batch status and the first payout item's transaction status."""
@@ -205,24 +271,17 @@ class PayPalClient:
         }
 
     def find_payout_batch(self, sender_batch_id: str) -> dict[str, Any] | None:
-        """Find a batch by sender_batch_id for reconciliation."""
+        """The batch ID this client already knows for a sender_batch_id.
+
+        Local only: PayPal's Payouts API has no search by sender_batch_id.
+        To learn about a send that never answered, use resend_payout.
+        """
         local = self._get_record(sender_batch_id)
         if local and local.get("paypal_batch_id"):
             return {"payout_batch_id": local["paypal_batch_id"]}
         if self._dry_run:
             return {"payout_batch_id": f"DRY_RUN_{sender_batch_id}"}
-        try:
-            response = self._http.get(
-                f"{self._base_url}/v1/payments/payouts",
-                headers={"Authorization": f"Bearer {self.get_access_token()}"},
-                params={"sender_batch_id": sender_batch_id},
-            )
-            response.raise_for_status()
-            payload = response.json()
-            batches = payload.get("items") or payload.get("batch_details") or []
-            return batches[0] if batches else None
-        except (httpx.HTTPError, ValueError, RuntimeError):
-            return None
+        return None
 
     def wait_for_final_status(
         self, paypal_batch_id: str, timeout_s: float = 120

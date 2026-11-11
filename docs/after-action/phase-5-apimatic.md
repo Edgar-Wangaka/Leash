@@ -39,20 +39,55 @@ login fails with "Error retrieving subscription info". That plan was dropped.
 | 2 | Statuses `CANCELED`, `BLOCKED`, `RETURNED`, `REFUNDED`, `REVERSED` were unknown | The payment stayed on "Checking with PayPal" forever and kept counting toward the daily budget | Mapped to `failed`, with the PayPal status as `error_name`; failed payments don't count as spend |
 | 3 | The client's `wait_for_final_status` stopped when the batch said SUCCESS, even if the item was ONHOLD | The smoke test could report early | Waits on the item status; records the status that wasn't paid, not the batch's SUCCESS |
 
-## Not fixed (needs a decision)
+## Follow-up: recovering a payout PayPal never answered (approved, done)
 
-- **`find_payout_batch` calls `GET /v1/payments/payouts?sender_batch_id=`,
-  which isn't in PayPal's schema.** Only four endpoints exist: create a batch,
-  get a batch by ID, get an item, cancel an item. So when the create call
-  times out before Leash learns the batch ID, the payment stays
-  `needs_reconcile` (shown as "Checking with PayPal"). PayPal's documented
-  recovery is to POST again with the same `sender_batch_id` and
-  `PayPal-Request-Id`. PayPal keeps request keys for 30 days, never pays the
-  same `sender_batch_id` twice, and on a 5xx says the retry is safe. That
-  re-send moves money if the first call never reached PayPal, so it wasn't done
-  without a review.
-- The 4 s reconcile poller keeps asking about the stuck payment, and nothing
-  times it out.
+**Problem.** `find_payout_batch` called `GET /v1/payments/payouts?sender_batch_id=`,
+which isn't in PayPal's schema. Only four endpoints exist: create a batch, get
+a batch by ID, get an item, and cancel an item. So when the create call timed
+out before Leash learned the batch ID, the payment stayed on "Checking with
+PayPal" forever.
+
+**Fix.** PayPal's documented recovery is to send the same request again.
+PayPal never pays a `sender_batch_id` used in the last 30 days twice, keeps
+`PayPal-Request-Id` keys for 30 days, and says a retry after a 5xx is safe.
+
+- `find_payout_batch` is now local only.
+- New `PayPalClient.resend_payout` POSTs the same body with the same
+  `sender_batch_id` and `PayPal-Request-Id`, and reads PayPal's answer:
+  - **201:** the batch ID.
+  - **Duplicate-batch error:** the original batch, read from the error's link.
+  - **5xx, timeout, 401 or 403:** still uncertain.
+  - **Any other refusal:** failed, with PayPal's error name.
+- The gate resends only payouts that are `needs_reconcile` with no batch ID.
+  A `submitted` payout is never resent. Before resending, the gate checks:
+  - **At most 5 attempts.** The count is saved before each send, so a crash
+    still counts.
+  - **Only within 7 days of the request**, well inside PayPal's 30-day memory.
+  - **The hard rules still pass** (cap, seller allowlist, daily budget),
+    because a resend pays if the first send never arrived. If the rules now
+    fail, the payment stays on "Checking with PayPal" for a human. It isn't
+    marked rejected, because the first send may have paid.
+- The resend uses the same note as the first send, so the request body
+  matches.
+
+**Tests.** `tests/test_payout_resend.py` (13 cases):
+- The resend uses the same IDs and the same body.
+- The original batch ID is read from PayPal's duplicate error.
+- A 5xx or 401 leaves the payment uncertain; a refusal marks it failed with
+  no spend.
+- A known batch is never POSTed again.
+- The lookup makes no network call.
+- Limits: the attempt limit, the 7-day window, and the rule recheck all stop
+  a resend.
+- A client without `resend_payout` keeps the old behaviour.
+- A `submitted` payout is never resent.
+
+Full suite after the follow-up: **271 passed, 1 skipped**.
+
+Not verified against real PayPal sandbox: the exact shape of PayPal's
+duplicate-batch error. The code only relies on its `links` entry pointing to
+`/v1/payments/payouts/{id}`, which the schema describes as a "HATEOAS link to
+the original payout".
 
 ## Tests
 
