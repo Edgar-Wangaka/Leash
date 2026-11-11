@@ -64,6 +64,7 @@ def _summary(record: dict[str, Any]) -> dict[str, Any]:
         next_step = "Blocked. Do not retry with different details; tell the user."
     elif status == "pending" and record["verdict"] == "hold_for_human":
         next_step = (
+            "Nothing has been paid yet. "
             "Waiting for a human to approve or deny in the Leash dashboard. "
             "Check later with get_payment_status."
         )

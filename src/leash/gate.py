@@ -5,16 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from payouts.paypal_client import PayPalClient
 
 from . import events
-from .explainer import explain, llm_risk_signal
+from .explainer import current_explanation, explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,21 @@ class PaymentGate:
         # Looks a product up in the catalog. None means no catalog is configured.
         self._price_lookup = price_lookup
         self._initialize_database()
+
+    @contextmanager
+    def _connect(self, timeout: float = 5.0) -> Iterator[sqlite3.Connection]:
+        """A connection that commits (or rolls back) and then closes.
+
+        ``with sqlite3.connect(...)`` alone only commits; the connection stays
+        open until garbage collection, and a dashboard polling every 1.5 s
+        piles up open database handles.
+        """
+        connection = sqlite3.connect(self.db_path, timeout=timeout)
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def close(self) -> None:
         close = getattr(self.payout_client, "close", None)
@@ -139,7 +155,7 @@ class PaymentGate:
             self._set_status(request_id, "expired")
             return self._result(False, "expired", "approval_expired", request_id)
 
-        with sqlite3.connect(self.db_path, timeout=30) as connection:
+        with self._connect(timeout=30) as connection:
             connection.execute("BEGIN IMMEDIATE")
             claimed = connection.execute(
                 """
@@ -190,7 +206,7 @@ class PaymentGate:
         if denied_by == record["agent_id"]:
             return self._result(False, "rejected", "denier_is_requesting_agent", request_id)
 
-        with sqlite3.connect(self.db_path, timeout=30) as connection:
+        with self._connect(timeout=30) as connection:
             connection.execute("BEGIN IMMEDIATE")
             claimed = connection.execute(
                 """
@@ -238,7 +254,7 @@ class PaymentGate:
 
     def poll_submitted(self) -> list[dict[str, Any]]:
         """Reconcile every submitted or uncertain row without resending."""
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             request_ids = [
                 row[0]
                 for row in connection.execute(
@@ -256,7 +272,7 @@ class PaymentGate:
 
     def list_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return the most recent decisions, newest first."""
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             request_ids = [
                 row[0]
                 for row in connection.execute(
@@ -265,7 +281,7 @@ class PaymentGate:
                     (int(limit),),
                 ).fetchall()
             ]
-        records = (self._get_decision(request_id) for request_id in request_ids)
+            records = [self._get_decision(request_id, connection) for request_id in request_ids]
         return [record for record in records if record]
 
     def daily_spend_usd(self) -> Decimal:
@@ -301,7 +317,7 @@ class PaymentGate:
             return self._result(False, "rejected", "verdict_not_payable", request_id, current)
 
         if not already_claimed:
-            with sqlite3.connect(self.db_path, timeout=30) as connection:
+            with self._connect(timeout=30) as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 claimed = connection.execute(
                     "UPDATE decisions SET status = 'paying' "
@@ -372,7 +388,7 @@ class PaymentGate:
     def _reserve_decision(
         self, request: PaymentRequest, catalog: dict[str, Any] | None = None
     ) -> tuple[Decision | None, dict[str, Any] | None]:
-        with sqlite3.connect(self.db_path, timeout=30) as connection:
+        with self._connect(timeout=30) as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT request_id FROM decisions WHERE request_id = ?",
@@ -397,7 +413,7 @@ class PaymentGate:
         exclude_request_id: str | None = None,
     ) -> dict[str, Any]:
         owns = connection is None
-        connection = connection or sqlite3.connect(self.db_path)
+        connection = connection or sqlite3.connect(self.db_path)  # closed below
         # created_at is stored as a UTC ISO-8601 string, so the window cutoffs
         # must be in the same format for the string comparison to be correct.
         now = self._now().astimezone(timezone.utc)
@@ -464,7 +480,7 @@ class PaymentGate:
         return reasons
 
     def _initialize_database(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS decisions (
@@ -563,18 +579,22 @@ class PaymentGate:
             ),
         )
 
-    def _get_decision(self, request_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.db_path) as connection:
-            row = connection.execute(
-                """
-                SELECT request_id, agent_id, merchant_email, amount_cents, amount_usd,
-                       verdict, reasons_json, status, policy_snapshot_json, request_json,
-                       payout_json, error_name, risk_signal, risk_reason, explanation,
-                       approved_by, approved_at, expires_at, created_at
-                FROM decisions WHERE request_id = ?
-                """,
-                (request_id,),
-            ).fetchone()
+    def _get_decision(
+        self, request_id: str, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any] | None:
+        if connection is None:
+            with self._connect() as owned:
+                return self._get_decision(request_id, owned)
+        row = connection.execute(
+            """
+            SELECT request_id, agent_id, merchant_email, amount_cents, amount_usd,
+                   verdict, reasons_json, status, policy_snapshot_json, request_json,
+                   payout_json, error_name, risk_signal, risk_reason, explanation,
+                   approved_by, approved_at, expires_at, created_at
+            FROM decisions WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
         if not row:
             return None
         return {
@@ -584,7 +604,8 @@ class PaymentGate:
             "policy_snapshot": json.loads(row[8]), "request": json.loads(row[9]),
             "request_json": row[9], "payout": json.loads(row[10]) if row[10] else None,
             "error_name": row[11], "risk_signal": row[12], "risk_reason": row[13],
-            "explanation": row[14], "approved_by": row[15], "approved_at": row[16],
+            "explanation": current_explanation(row[14], row[7]),
+            "approved_by": row[15], "approved_at": row[16],
             "expires_at": row[17], "created_at": row[18],
         }
 
@@ -599,7 +620,7 @@ class PaymentGate:
             "policy_snapshot": self.policy,
             "catalog": record["request"].get("catalog"),
         })
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE decisions SET verdict = ?, reasons_json = ?, risk_signal = ?,
@@ -617,7 +638,7 @@ class PaymentGate:
         self, request_id: str, status: str, payout: dict[str, Any] | None = None,
         error_name: str | None = None,
     ) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             previous = connection.execute(
                 "SELECT status FROM decisions WHERE request_id = ?", (request_id,)
             ).fetchone()
@@ -636,7 +657,7 @@ class PaymentGate:
             self._notify(kind, request_id)
 
     def _set_rejected_on_recheck(self, request_id: str, reasons: list[str]) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE decisions SET status = 'rejected_on_recheck', reasons_json = ? WHERE request_id = ?",
                 (json.dumps(reasons), request_id),

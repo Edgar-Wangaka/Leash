@@ -87,7 +87,30 @@ def explain(decision: dict[str, Any]) -> str:
         waiting.append("the AI risk check flagged the request")
     if not waiting:
         waiting.append("it needs a review")
-    return f"Waiting for your approval because {_join(waiting)}. Nothing has been paid.{price_note}"
+    # Why it was held, not what happened next: this text is stored once, and a
+    # line like "nothing has been paid" would be wrong after approval.
+    return f"{WAITING} {_join(waiting)}.{price_note}"
+
+
+STALE_STATUS_NOTE = " Nothing has been paid."
+WAITING = "Waiting for your approval because"
+SETTLED = "Held for approval because"
+
+
+def current_explanation(explanation: str, status: str) -> str:
+    """The stored explanation, worded for the record's current status.
+
+    A hold's text is written while it waits. Once it is approved, denied or
+    expired, "Waiting for your approval" becomes "Held for approval", and the
+    "Nothing has been paid." that older holds carry is dropped.
+    """
+    text = explanation or ""
+    if status == "pending":
+        return text
+    text = text.replace(STALE_STATUS_NOTE, "")
+    if text.startswith(WAITING):
+        text = SETTLED + text[len(WAITING):]
+    return text
 
 
 def llm_risk_signal(

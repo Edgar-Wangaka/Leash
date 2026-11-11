@@ -740,3 +740,84 @@ def test_agent_sends_the_product_id_so_the_price_is_checked(tmp_path):
     assert looked_up == ["prod_9"]
     assert result["reasons"] == ["price_mismatch"]
     assert payout.calls == []
+
+
+# --- explanations stay true after approval; connections are closed -------------
+
+def test_hold_explanation_does_not_claim_a_status(tmp_path):
+    payout = FakePayout()
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        payout_client=payout,
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        held = gate.process(hold_request())
+        paid = gate.approve("hold-key", "human-reviewer")
+        record = gate.list_decisions(5)[0]
+
+    assert held["verdict"] == "hold_for_human"
+    assert "approval threshold" in held["explanation"]
+    assert "paid" not in held["explanation"].lower()
+    assert paid["status"] == "paid" and record["status"] == "paid"
+    assert "Nothing has been paid" not in record["explanation"]
+    assert record["explanation"].startswith("Held for approval because")
+
+
+def test_older_hold_text_is_cleaned_once_the_hold_is_settled(tmp_path):
+    import sqlite3
+
+    db = str(tmp_path / "leash.db")
+    with PaymentGate(
+        db_path=db, payout_client=FakePayout(), risk_signal=lambda request, task: ("none", "none")
+    ) as gate:
+        gate.process(hold_request())
+        legacy = "Waiting for your approval because $50.00 is over the line. Nothing has been paid."
+        connection = sqlite3.connect(db)
+        with connection:
+            connection.execute("UPDATE decisions SET explanation = ?", (legacy,))
+        connection.close()
+
+        assert gate.list_decisions(1)[0]["explanation"] == legacy  # still pending: true
+        gate.approve("hold-key", "human-reviewer")
+        assert gate.list_decisions(1)[0]["explanation"] == (
+            "Held for approval because $50.00 is over the line."
+        )
+
+
+def test_gate_closes_every_database_connection(tmp_path, monkeypatch):
+    import sqlite3
+
+    import leash.gate as gate_module
+
+    opened, real_connect = [], sqlite3.connect
+
+    class Tracked(sqlite3.Connection):
+        closed = False
+
+        def close(self):
+            self.closed = True
+            super().close()
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, factory=Tracked, **kwargs)
+        opened.append(connection)
+        return connection
+
+    monkeypatch.setattr(gate_module.sqlite3, "connect", connect)
+    with PaymentGate(
+        db_path=str(tmp_path / "leash.db"),
+        payout_client=FakePayout(),
+        risk_signal=lambda request, task: ("none", "none"),
+    ) as gate:
+        gate.process(allowed_request())
+        gate.process(hold_request())
+        gate.approve("hold-key", "human-reviewer")
+        before = len(opened)
+        gate.list_decisions(100)
+        gate.daily_spend_usd()
+        list_cost = len(opened) - before
+
+    assert opened and all(connection.closed for connection in opened)
+    # The dashboard's 1.5 s poll: one connection for the list, plus one for the
+    # budget, not one per decision.
+    assert list_cost == 2
