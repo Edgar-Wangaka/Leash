@@ -37,6 +37,9 @@ from .policy import PaymentRequest, load_policy
 logger = logging.getLogger(__name__)
 PAGE_PATH = Path(__file__).with_name("dashboard.html")
 APPROVER = "human-dashboard"
+# Approvals and limit changes made with LEASH_DEMO_TOKEN (the token handed to
+# hackathon judges) are recorded under this name, so the log shows who acted.
+DEMO_APPROVER = "judge-demo"
 TOKEN_HEADER = "X-Leash-Token"
 
 # Scripted stand-ins for an agent, so the three outcomes can be shown without
@@ -125,10 +128,15 @@ def public_hosts_from_env() -> list[str]:
 
 
 def make_handler(
-    gate: PaymentGate, token: str, public_hosts: list[str] | None = None
+    gate: PaymentGate, token: str, public_hosts: list[str] | None = None,
+    demo_token: str | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     if not token:
         raise ValueError("the dashboard needs a non-empty token")
+    if demo_token is not None and (
+        not demo_token or secrets.compare_digest(demo_token.encode(), token.encode())
+    ):
+        raise ValueError("the demo token must be set and differ from the dashboard token")
     public = {host.lower() for host in public_hosts or []}
 
     class Handler(BaseHTTPRequestHandler):
@@ -158,9 +166,15 @@ def make_handler(
             host = self.headers.get("Host", "").lower()
             return host in self._allowed_hosts() or host in public
 
+        def _who(self) -> str | None:
+            """Who is acting: the human, a judge with the demo token, or nobody."""
+            sent = self.headers.get(TOKEN_HEADER, "").encode()
+            human = secrets.compare_digest(sent, token.encode())
+            judge = demo_token is not None and secrets.compare_digest(sent, demo_token.encode())
+            return APPROVER if human else DEMO_APPROVER if judge else None
+
         def _authorized(self) -> bool:
-            sent = self.headers.get(TOKEN_HEADER, "")
-            return secrets.compare_digest(sent.encode(), token.encode())
+            return self._who() is not None
 
         def _same_origin(self) -> bool:
             # Refuse cross-site form posts: a web page the user happens to
@@ -258,15 +272,16 @@ def make_handler(
                 self._json(400, {"error": "bad_json"})
                 return
 
+            who = self._who() or APPROVER
             if self.path == "/api/approve":
-                result = gate.approve(str(body.get("request_id", "")), APPROVER)
+                result = gate.approve(str(body.get("request_id", "")), who)
             elif self.path == "/api/deny":
                 reason = str(body.get("reason") or "Denied in dashboard")
-                result = gate.deny(str(body.get("request_id", "")), APPROVER, reason)
+                result = gate.deny(str(body.get("request_id", "")), who, reason)
             elif self.path == "/api/settings":
                 result = gate.change_settings(
                     body.get("changes") if "changes" in body else {},
-                    changed_by=APPROVER,
+                    changed_by=who,
                     confirm_loosening=body.get("confirm_loosening") is True,
                     reset=body.get("reset") is True,
                 )
@@ -323,6 +338,25 @@ def dashboard_token() -> tuple[str, bool]:
     return secrets.token_urlsafe(32), False
 
 
+def demo_token_from_env(dashboard_token: str) -> str | None:
+    """The judges' token (LEASH_DEMO_TOKEN), or None when it is not set.
+
+    It may do everything the human can in the dashboard, under its own name,
+    and can be rotated without touching the human's token. It must differ
+    from the dashboard and MCP tokens: the agent must never hold it.
+    """
+    demo = os.getenv("LEASH_DEMO_TOKEN", "").strip()
+    if not demo:
+        return None
+    if len(demo) < 16:
+        raise SystemExit("LEASH_DEMO_TOKEN must be at least 16 characters")
+    for name, other in (("LEASH_DASHBOARD_TOKEN", dashboard_token),
+                        ("LEASH_MCP_TOKEN", os.getenv("LEASH_MCP_TOKEN", "").strip())):
+        if other and secrets.compare_digest(demo.encode(), other.encode()):
+            raise SystemExit(f"LEASH_DEMO_TOKEN must differ from {name}")
+    return demo
+
+
 def build_server(
     gate: PaymentGate, *, host: str | None = None, port: int | None = None,
     token: str | None = None,
@@ -338,7 +372,9 @@ def build_server(
         raise SystemExit(
             "Listening beyond loopback needs LEASH_PUBLIC_HOST, the name people use"
         )
-    httpd = ThreadingHTTPServer((host, port), make_handler(gate, token, public))
+    httpd = ThreadingHTTPServer(
+        (host, port), make_handler(gate, token, public, demo_token_from_env(token))
+    )
     return httpd, token, from_env
 
 

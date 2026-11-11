@@ -377,6 +377,184 @@
               }
             }
           }
+        },
+        {
+          "name": "Limits: back to the policy.json defaults",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"accepted (saved, or already the defaults)\", () => {",
+                  "  pm.expect([200, 409]).to.include(pm.response.code);",
+                  "});",
+                  "if (pm.response.code === 409) {",
+                  "  pm.test(\"asks before loosening\", () => pm.expect(pm.response.json().reason).to.eql(\"confirm_loosening\"));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Leash-Token",
+                "value": "{{dashboardToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"reset\": true}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Limits: tighten the daily budget (applies at once)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"saved\", () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect([\"saved\", \"unchanged\"]).to.include(pm.response.json().reason);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Leash-Token",
+                "value": "{{dashboardToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"changes\": {\"daily_budget_usd\": 100}}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Limits: loosening without confirming is refused",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"409 asks for confirmation\", () => {",
+                  "  pm.response.to.have.status(409);",
+                  "  pm.expect(pm.response.json().loosened).to.include(\"daily_budget_usd\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Leash-Token",
+                "value": "{{dashboardToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"changes\": {\"daily_budget_usd\": 2000}}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Limits: loosen with confirmation, back to the defaults",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"saved\", () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect([\"saved\", \"unchanged\"]).to.include(pm.response.json().reason);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Leash-Token",
+                "value": "{{dashboardToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"reset\": true, \"confirm_loosening\": true}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings"
+              ]
+            }
+          }
         }
       ]
     },
@@ -842,6 +1020,87 @@
                   "language": "json"
                 }
               }
+            }
+          }
+        },
+        {
+          "name": "Change limits without a token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"refused with 401\", () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"changes\": {\"daily_budget_usd\": 2000}, \"confirm_loosening\": true}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Change limits beyond the allowed range",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"refused with 400 and a reason for the field\", () => {",
+                  "  pm.response.to.have.status(400);",
+                  "  pm.expect(pm.response.json().errors).to.have.property(\"per_transaction_cap_usd\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Leash-Token",
+                "value": "{{dashboardToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"changes\": {\"per_transaction_cap_usd\": 1000000}, \"confirm_loosening\": true}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/settings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "settings"
+              ]
             }
           }
         }

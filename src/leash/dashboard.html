@@ -117,6 +117,25 @@
   #signin .bad { color: var(--blocked); font: 13px var(--mono); }
   #signout { font-size: 11px; padding: 6px 8px; margin-left: 10px; }
 
+  details.limits { margin-top: 18px; border-top: 1px solid var(--rule); padding-top: 10px; }
+  details.limits > summary { cursor: pointer; font: 700 12px/1.6 var(--mono); letter-spacing: .12em;
+    text-transform: uppercase; color: var(--navy); }
+  details.limits > summary:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+  .limit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px 20px; margin-top: 14px; }
+  .limit-grid label { display: grid; gap: 4px; font-size: 14px; }
+  .limit-grid input, .limit-grid textarea { font: 15px/1.4 var(--mono); padding: 7px 9px; border: 1px solid var(--ink);
+    background: transparent; color: inherit; min-width: 0; }
+  .limit-grid textarea { resize: vertical; min-height: 64px; }
+  .limit-grid .wide { grid-column: 1 / -1; }
+  .limit-grid small { color: var(--muted); font: 12px/1.4 var(--mono); }
+  .limit-grid .field-error { color: var(--blocked); font: 12px/1.4 var(--mono); }
+  .limit-actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  .limit-actions span { font-size: 14px; color: var(--muted); }
+  #limitConfirm { margin-top: 12px; padding: 12px 14px; border: 2px solid var(--blocked); display: grid; gap: 10px; }
+  #limitConfirm[hidden] { display: none; }
+  #limitHistory { list-style: none; padding: 0; margin-top: 14px; font: 12px/1.6 var(--mono); color: var(--muted); }
+  #limitHistory li { margin-bottom: 4px; overflow-wrap: anywhere; }
+
   @keyframes ink { from { background: var(--gold); } to { background: transparent; } }
   @keyframes drop { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
@@ -167,6 +186,33 @@
       <span>Limit of <b id="rate"></b> requests a minute</span>
     </div>
   </section>
+
+  <details class="limits" id="limits">
+    <summary>Change limits</summary>
+    <form id="limitForm" novalidate>
+      <div class="limit-grid">
+        <label>Per-payment cap ($)<input name="per_transaction_cap_usd" inputmode="decimal"><small data-range="per_transaction_cap_usd"></small><span class="field-error" data-error="per_transaction_cap_usd"></span></label>
+        <label>Daily budget ($)<input name="daily_budget_usd" inputmode="decimal"><small data-range="daily_budget_usd"></small><span class="field-error" data-error="daily_budget_usd"></span></label>
+        <label>Approval threshold ($)<input name="approval_threshold_usd" inputmode="decimal"><small data-range="approval_threshold_usd"></small><span class="field-error" data-error="approval_threshold_usd"></span></label>
+        <label>Requests per minute<input name="max_requests_per_minute" inputmode="numeric"><small data-range="max_requests_per_minute"></small><span class="field-error" data-error="max_requests_per_minute"></span></label>
+        <label>Hold expiry (hours)<input name="human_approval_expiry_hours" inputmode="numeric"><small data-range="human_approval_expiry_hours"></small><span class="field-error" data-error="human_approval_expiry_hours"></span></label>
+        <label class="wide">Approved sellers (one email per line)<textarea name="merchant_allowlist" spellcheck="false"></textarea><small data-range="merchant_allowlist"></small><span class="field-error" data-error="merchant_allowlist"></span></label>
+      </div>
+      <div class="limit-actions">
+        <button class="sign" type="submit">Save limits</button>
+        <button type="button" id="limitReset">Back to defaults</button>
+        <span id="limitStatus" role="status"></span>
+      </div>
+      <div id="limitConfirm" hidden>
+        <div id="limitConfirmText"></div>
+        <div class="limit-actions">
+          <button class="refuse" type="button" id="limitConfirmYes">Yes, loosen them</button>
+          <button type="button" id="limitConfirmNo">Cancel</button>
+        </div>
+      </div>
+    </form>
+    <ul id="limitHistory"></ul>
+  </details>
 
   <h2 class="label section">Waiting for your approval <em id="holdcount"></em></h2>
   <div id="holds"></div>
@@ -357,6 +403,7 @@
       lastState = text;
       const state = JSON.parse(text);
       renderRules(state);
+      renderLimits(state.settings);
       renderHolds(state.decisions.filter((d) => d.verdict === "hold_for_human" && d.status === "pending"),
         state.price_alerts || {});
       renderLedger(state.decisions);
@@ -364,6 +411,98 @@
       lastState = ""; $("mode").textContent = "Dashboard server is not running"; $("mode").className = "down";
     }
   }
+  // Spending limits: the human (or a judge) can change them here. The server
+  // checks every value; this form only shows what it says.
+  const MONEY = ["per_transaction_cap_usd", "daily_budget_usd", "approval_threshold_usd"];
+  const COUNTS = ["max_requests_per_minute", "human_approval_expiry_hours"];
+  let limitsShown = null, limitsDirty = false, pendingChanges = null, labels = {};
+
+  function renderLimits(settings) {
+    if (!settings || !settings.current) return;
+    labels = settings.labels || {};
+    const form = $("limitForm");
+    for (const [field, range] of Object.entries(settings.limits || {})) {
+      const note = form.querySelector('[data-range="' + field + '"]');
+      if (!note) continue;
+      const isMoney = MONEY.includes(field), fmt = (v) => isMoney ? money(v) : String(v);
+      note.textContent = field === "merchant_allowlist"
+        ? "Up to " + range.max + " sellers"
+        : "Allowed: " + ("min" in range ? fmt(range.min) : fmt(0)) + " to " + fmt(range.max);
+    }
+    const shown = JSON.stringify([settings.version, settings.current]);
+    if (shown !== limitsShown && !limitsDirty) {
+      limitsShown = shown;
+      for (const field of [...MONEY, ...COUNTS]) form.elements[field].value = settings.current[field];
+      form.elements.merchant_allowlist.value = (settings.current.merchant_allowlist || []).join("\n");
+    }
+    const list = $("limitHistory"); list.replaceChildren();
+    for (const h of settings.history || []) {
+      const what = Object.entries(h.changes || {}).map(([field, c]) =>
+        (labels[field] || field) + " " + show(c.from) + " → " + show(c.to)).join("; ");
+      list.append(el("li", "", "v" + h.version + " · " + new Date(h.changed_at).toLocaleString() +
+        " · " + h.changed_by + ": " + (what || "no change")));
+    }
+  }
+  const show = (v) => Array.isArray(v) ? v.length + " sellers" : String(v);
+
+  function readLimits() {
+    const form = $("limitForm"), changes = {};
+    for (const field of [...MONEY, ...COUNTS]) {
+      const raw = form.elements[field].value.trim();
+      changes[field] = raw === "" ? raw : Number(raw);
+      if (Number.isNaN(changes[field])) changes[field] = raw;  // let the server name the error
+    }
+    changes.merchant_allowlist = form.elements.merchant_allowlist.value
+      .split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+    return changes;
+  }
+
+  async function saveLimits(body) {
+    const form = $("limitForm");
+    for (const note of form.querySelectorAll("[data-error]")) note.textContent = "";
+    $("limitStatus").textContent = "Saving…";
+    const response = await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Leash-Token": token },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 401) { askForToken(true); return; }
+    const result = await response.json();
+    if (result.reason === "confirm_loosening") {
+      pendingChanges = body;
+      $("limitConfirmText").textContent = "This loosens " +
+        result.loosened.map((f) => labels[f] || f).join(", ") +
+        ". The agent could spend more without asking you. Are you sure?";
+      $("limitConfirm").hidden = false; $("limitStatus").textContent = ""; return;
+    }
+    $("limitConfirm").hidden = true;
+    if (result.reason === "invalid") {
+      for (const [field, message] of Object.entries(result.errors || {})) {
+        const note = form.querySelector('[data-error="' + field + '"]');
+        if (note) note.textContent = message; else $("limitStatus").textContent = message;
+      }
+      if (!$("limitStatus").textContent || $("limitStatus").textContent === "Saving…")
+        $("limitStatus").textContent = "Some values are not allowed. See the notes above.";
+      return;
+    }
+    if (result.reason === "settings_store_unavailable") {
+      $("limitStatus").textContent = "The limits could not be saved right now. Nothing changed. Try again.";
+      return;
+    }
+    limitsDirty = false; limitsShown = null;
+    $("limitStatus").textContent = result.reason === "unchanged" ? "Nothing to change."
+      : "Saved as version " + result.version + ". The new limits apply now.";
+    lastState = ""; refresh();
+  }
+
+  $("limitForm").addEventListener("input", () => { limitsDirty = true; });
+  $("limitForm").onsubmit = (event) => { event.preventDefault(); saveLimits({ changes: readLimits() }); };
+  $("limitReset").onclick = () => saveLimits({ reset: true });
+  $("limitConfirmYes").onclick = () => saveLimits({ ...pendingChanges, confirm_loosening: true });
+  $("limitConfirmNo").onclick = () => {
+    $("limitConfirm").hidden = true; pendingChanges = null; limitsDirty = false; limitsShown = null;
+    $("limitStatus").textContent = "Cancelled. Nothing changed."; lastState = ""; refresh();
+  };
+
   // No token, or a wrong one: ask for it here instead of needing a terminal.
   function askForToken(rejected) {
     $("mode").textContent = "Sign in with your dashboard token"; $("mode").className = "down";

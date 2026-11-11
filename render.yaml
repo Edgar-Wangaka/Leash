@@ -26,6 +26,8 @@ services:
         sync: false          # the human's approval token
       - key: LEASH_MCP_TOKEN
         sync: false          # the agent's token; must differ from the above
+      - key: LEASH_DEMO_TOKEN
+        sync: false          # optional: judges' dashboard token, recorded as judge-demo; must differ from both
       - key: PAYPAL_CLIENT_ID
         sync: false
       - key: PAYPAL_CLIENT_SECRET

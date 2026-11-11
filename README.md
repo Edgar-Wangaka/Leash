@@ -161,6 +161,11 @@ persistent disk.
    - `LEASH_DASHBOARD_TOKEN`: the human's approval token (16+ characters).
      Open `https://<host>/` and paste it into the sign-in box (or open
      `https://<host>/#token=<it>`). It is kept in that browser tab only.
+   - `LEASH_DEMO_TOKEN` (optional): a second dashboard token to hand to
+     hackathon judges. It can do everything yours can, and its approvals and
+     limit changes are recorded as `judge-demo`. It must be 16+ characters
+     and differ from both other tokens. Change it after judging to lock
+     judges out without touching yours.
    - `LEASH_MCP_TOKEN`: the agent's token. It must differ from the dashboard
      token. The dashboard refuses it, so an agent holding it cannot approve.
    - PayPal and Channel3 keys as in `.env`.
@@ -298,13 +303,15 @@ count, because the money has left the account.
 ### Changing the limits
 
 You can change the cap, the daily budget, the approval threshold, requests per
-minute, hold expiry and the approved sellers while Leash runs, with
-`POST /api/settings` and your dashboard token. The dashboard form arrives in a
-later phase. Every payment Leash decides afterwards uses the new limits, and
-the MCP server picks a change up within 2 seconds.
+minute, hold expiry and the approved sellers while Leash runs: open **Change
+limits** under the rules on the dashboard, or call `POST /api/settings` with
+your dashboard token. Every payment Leash decides afterwards uses the new
+limits, and the MCP server picks a change up within 2 seconds. The form shows
+each field's allowed range, the reason next to any value that isn't allowed,
+and the last 10 changes.
 
-- Only your dashboard token can do this. The agent has no tool for it, and the
-  dashboard refuses the agent's token.
+- Only a dashboard token can do this: yours, or the judges' demo token below.
+  The agent has no tool for it, and the dashboard refuses the agent's token.
 - Each value must fit the range under `editable_limits` in `policy.json`, and
   the approval threshold ≤ the per-payment cap ≤ the daily budget.
 - Tightening a limit applies at once. Loosening one (raising a number, adding
