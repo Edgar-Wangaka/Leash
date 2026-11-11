@@ -120,6 +120,98 @@ The dashboard also has three test request buttons that send fixed requests
 through the same rules, one of them a hijacked request. Use them when no model
 is attached.
 
+## Run it on another machine (Render)
+
+The full fix for "a program running as your user can open `leash.db`" is to
+run Leash somewhere the agent has no shell. `render.yaml` sets that up as one
+Render web service: `python -m leash.remote` serves the dashboard at `/`, the
+MCP endpoint at `/mcp` and a health check at `/healthz` on one port, so the
+dashboard, the reconcile poller and the MCP server share one database on one
+persistent disk.
+
+1. In Render, choose **New → Blueprint** and point it at this repository.
+2. Fill in the secrets it asks for:
+   - `LEASH_PUBLIC_HOST`: the name people use, e.g. `leash.onrender.com` or
+     your custom domain.
+   - `LEASH_DASHBOARD_TOKEN`: the human's approval token (16+ characters).
+     Open `https://<host>/#token=<it>`.
+   - `LEASH_MCP_TOKEN`: the agent's token. It must differ from the dashboard
+     token. The dashboard refuses it, so an agent holding it cannot approve.
+   - PayPal and Channel3 keys as in `.env`.
+3. The Blueprint uses the free plan: the database is wiped on each deploy and
+   the instance sleeps when idle. For a log that survives deploys, switch to
+   the Starter plan (about $7/month) and add the disk described in
+   `render.yaml`.
+
+Point Claude Desktop at the remote MCP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "leash": {
+      "type": "http",
+      "url": "https://leash.onrender.com/mcp",
+      "headers": { "Authorization": "Bearer <LEASH_MCP_TOKEN>" }
+    }
+  }
+}
+```
+
+To run only the MCP server over HTTP on your own machine, set
+`LEASH_MCP_TRANSPORT=streamable-http` and `LEASH_MCP_TOKEN`, then start
+`python -m leash.mcp_server` (it listens on `127.0.0.1:8788`).
+
+## Watch an agent get hijacked in a real browser (KERNEL)
+
+The planted listing is also a real product page, served by the dashboard at
+`/demo/listing/premium-birthday-gift-box`. A person sees a gift box, a price
+and a seller. The instruction to pay the attacker is on the page too, in
+white-on-white text and in an HTML comment, where a scraping agent reads it.
+Set `LEASH_DEMO_PAGES=false` to stop serving it.
+
+```bash
+.venv/bin/python -m leash.demo_injection --live
+```
+
+The live demo searches products, opens the listing page, plays an agent that
+obeys what it finds hidden there, and sends the hijacked request to Leash,
+which blocks it. It prints what was visible, what was hidden, the request
+and the verdict.
+
+To use a real cloud browser, install the extra (`pip install ".[kernel]"`,
+then `playwright install chromium`), set `KERNEL_API_KEY`, and set
+`LEASH_DEMO_BASE_URL` to a public Leash deploy such as
+`https://leash.onrender.com`. The page then loads in a KERNEL browser and
+the demo prints its live-view link, which you can record next to the
+dashboard. Without a key, the page is rendered locally.
+
+The scripted shopping agent and the LLM agent can take the same browser
+(`ShoppingAgent(..., browse_fn=browse_page)`); the LLM agent then gets a
+`browse_page` tool. Whatever a page says, the price and seller checks in the
+gate still decide.
+
+## Get told when a payment is held (Zapier)
+
+Set `ZAPIER_HOOK_URL` to a Zapier **Webhooks by Zapier → Catch Hook** URL.
+Leash then posts every held and blocked decision to it as flat fields:
+`event`, `amount_usd`, `seller`, `agent`, `item`, `reasons`, `is_attack`,
+`attack_reasons`, `channel3_price_usd`, `channel3_sold_by`, `explanation` and
+`dashboard_url` (the dashboard link, never the token). Set
+`ZAPIER_ALL_EVENTS=true` to send every event, for an audit-log sheet.
+
+Suggested Zaps:
+
+- **Held → Slack, SMS or Gmail.** Filter `event` = `decision.held`. Message:
+  "Agent wants ${{amount_usd}} for {{item}}. Review: {{dashboard_url}}".
+- **Attack → high-priority alert.** Filter `is_attack` = true.
+- **Everything → Google Sheets row**, with `ZAPIER_ALL_EVENTS=true`.
+
+There is deliberately no Zap that approves a payment. That would be a second
+way to approve that skips the dashboard token.
+
+Zapier only gets a copy after the decision is stored. If Zapier is down or
+slow, payments are decided exactly as before.
+
 ## Policy
 
 The limits live in `config/policy.json`: per-payment cap, daily budget,

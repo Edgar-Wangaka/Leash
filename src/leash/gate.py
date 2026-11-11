@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from payouts.paypal_client import PayPalClient
 
+from . import events
 from .explainer import explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
 
@@ -39,8 +40,12 @@ class PaymentGate:
         now: Callable[[], datetime] | None = None,
         risk_signal: Callable[[PaymentRequest, str], tuple[str, str]] | None = None,
         price_lookup: Callable[[str], dict[str, Any]] | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self.db_path = db_path
+        # Told about each committed decision change. It sees a copy of the
+        # record after the fact and cannot change the outcome.
+        self._on_event = on_event if on_event is not None else events.emit
         self.policy = load_policy(policy_path)
         self.payout_client = payout_client or PayPalClient()
         self._now = now or (lambda: datetime.now(timezone.utc))
@@ -78,6 +83,8 @@ class PaymentGate:
             self._update_policy(request.request_id, decision, signal, signal_reason)
 
         record = self._get_decision(request.request_id) or {}
+        if record:
+            self._notify(events.initial_kind(record), record)
         if decision.verdict == "allow":
             result = self._pay(record, request)
             return result["record"]
@@ -145,6 +152,8 @@ class PaymentGate:
                 (approved_by, now.isoformat(), request_id, now.isoformat()),
             ).rowcount
             connection.commit()
+        if claimed == 1:
+            self._notify("decision.approved", request_id)
 
         if claimed != 1:
             latest = self._get_decision(request_id)
@@ -208,6 +217,8 @@ class PaymentGate:
                 request_id,
                 latest,
             )
+        if latest:
+            self._notify("decision.denied", latest)
         return self._result(True, "denied", None, request_id, latest)
 
     def reconcile(self, request_id: str) -> dict[str, Any]:
@@ -607,6 +618,9 @@ class PaymentGate:
         error_name: str | None = None,
     ) -> None:
         with sqlite3.connect(self.db_path) as connection:
+            previous = connection.execute(
+                "SELECT status FROM decisions WHERE request_id = ?", (request_id,)
+            ).fetchone()
             connection.execute(
                 """
                 UPDATE decisions SET status = ?, payout_json = COALESCE(?, payout_json),
@@ -615,6 +629,11 @@ class PaymentGate:
                 """,
                 (status, json.dumps(payout) if payout is not None else None, error_name, request_id),
             )
+        # Only a real change is an event: polling a submitted payout that is
+        # still submitted must not announce it again.
+        kind = events.STATUS_EVENTS.get(status)
+        if kind and previous and previous[0] != status:
+            self._notify(kind, request_id)
 
     def _set_rejected_on_recheck(self, request_id: str, reasons: list[str]) -> None:
         with sqlite3.connect(self.db_path) as connection:
@@ -622,6 +641,20 @@ class PaymentGate:
                 "UPDATE decisions SET status = 'rejected_on_recheck', reasons_json = ? WHERE request_id = ?",
                 (json.dumps(reasons), request_id),
             )
+        self._notify("decision.rejected_on_recheck", request_id)
+
+    def _notify(self, kind: str, record_or_id: dict[str, Any] | str) -> None:
+        """Hand a committed change to the event bus. Never raises."""
+        try:
+            record = (
+                self._get_decision(record_or_id)
+                if isinstance(record_or_id, str)
+                else record_or_id
+            )
+            if record:
+                self._on_event(kind, record)
+        except Exception as error:
+            logger.warning("Event hook failed: %s", error.__class__.__name__)
 
     def _is_expired(self, record: dict[str, Any], now: datetime) -> bool:
         return bool(record.get("expires_at") and record["expires_at"] <= now.isoformat())

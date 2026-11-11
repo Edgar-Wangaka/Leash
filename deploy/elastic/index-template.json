@@ -1,0 +1,32 @@
+{
+  "index_patterns": ["leash-decisions*"],
+  "template": {
+    "mappings": {
+      "dynamic": "strict",
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "event": { "type": "keyword" },
+        "request_id": { "type": "keyword" },
+        "agent_id": { "type": "keyword" },
+        "merchant_email": { "type": "keyword" },
+        "amount_usd": { "type": "scaled_float", "scaling_factor": 100 },
+        "blocked_amount_usd": { "type": "scaled_float", "scaling_factor": 100 },
+        "verdict": { "type": "keyword" },
+        "status": { "type": "keyword" },
+        "reasons": { "type": "keyword" },
+        "attack_reasons": { "type": "keyword" },
+        "is_attack": { "type": "boolean" },
+        "item": { "type": "text", "fields": { "raw": { "type": "keyword", "ignore_above": 256 } } },
+        "product_id": { "type": "keyword" },
+        "explanation": { "type": "text" },
+        "risk_signal": { "type": "keyword" },
+        "approved_by": { "type": "keyword" },
+        "paypal_batch_id": { "type": "keyword" },
+        "channel3_status": { "type": "keyword" },
+        "channel3_price_usd": { "type": "scaled_float", "scaling_factor": 100 },
+        "channel3_sold_by": { "type": "keyword" },
+        "decision_created_at": { "type": "date" }
+      }
+    }
+  }
+}

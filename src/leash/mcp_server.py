@@ -16,7 +16,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 
-from . import config
+from . import config, events
 from .agent import ProductSearcher
 from .catalog import price_lookup_from_env
 from .gate import PaymentGate
@@ -40,6 +40,7 @@ def _get_gate() -> PaymentGate:
     global _gate
     if _gate is None:
         config.configure()
+        events.install_from_env()
         _gate = PaymentGate(
             db_path=config.leash_db_path(),
             price_lookup=price_lookup_from_env(load_policy()["merchant_allowlist"]),
@@ -104,6 +105,7 @@ def search_products(query: str, max_price_usd: float | None = None) -> dict[str,
                 "sold_by": product.get("sold_by"),
                 "product_id": product.get("channel3_product_id"),
                 "merchant_email": product.get("merchant_email"),
+                "url": product.get("url"),
             }
             for product in products
         ],
@@ -143,9 +145,35 @@ def get_payment_status(request_id: str) -> dict[str, Any]:
     return _summary(record)
 
 
+TRANSPORTS = {"stdio", "streamable-http"}
+
+
+def transport_from_env() -> str:
+    transport = os.getenv("LEASH_MCP_TRANSPORT", "stdio").strip().lower() or "stdio"
+    if transport not in TRANSPORTS:
+        raise SystemExit(
+            f"LEASH_MCP_TRANSPORT must be one of {sorted(TRANSPORTS)}, not {transport!r}"
+        )
+    return transport
+
+
 def main() -> None:
     config.configure()
-    server.run("stdio")
+    transport = transport_from_env()
+    if transport == "stdio":
+        server.run("stdio")
+        return
+    # Over HTTP anyone who can reach the port could call the tools, so the
+    # agent must present its own bearer token. It is never the dashboard's.
+    import uvicorn
+
+    from .remote import build_mcp_app, mcp_token_from_env
+
+    public = [h.strip() for h in os.getenv("LEASH_PUBLIC_HOST", "").split(",") if h.strip()]
+    app = build_mcp_app(mcp_token_from_env(os.getenv("LEASH_DASHBOARD_TOKEN")), public)
+    host = os.getenv("LEASH_MCP_HOST", "127.0.0.1")
+    port = int(os.getenv("LEASH_MCP_PORT", "8788"))
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

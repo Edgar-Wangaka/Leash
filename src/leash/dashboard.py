@@ -2,7 +2,9 @@
 
 Run with:  python -m leash.dashboard   (then open http://127.0.0.1:8787)
 
-The server listens on 127.0.0.1 only. Approve and deny live here and nowhere
+Locally the server listens on 127.0.0.1 only. On a host such as Render, set
+LEASH_DASHBOARD_HOST=0.0.0.0, LEASH_PUBLIC_HOST=<your domain> and
+LEASH_DASHBOARD_TOKEN=<a secret>; see render.yaml. Approve and deny live here and nowhere
 in the agent's tool set. Every /api/ call must carry a secret token that is
 made at startup and printed once, inside the dashboard link, so another local
 process (an agent with a shell, say) cannot call approve by itself. The token
@@ -25,8 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import config
+from . import browser, config, events
 from .catalog import price_lookup_from_env
+from .events import public_record
 from .gate import PaymentGate
 from .policy import PaymentRequest, load_policy
 
@@ -57,25 +60,8 @@ SCENARIOS: dict[str, dict[str, str]] = {
 }
 
 
-def _public(record: dict[str, Any]) -> dict[str, Any]:
-    payout = record.get("payout") or {}
-    return {
-        "request_id": record["request_id"],
-        "agent_id": record["agent_id"],
-        "merchant_email": record["merchant_email"],
-        "amount_usd": f"{record['amount_cents'] / 100:.2f}",
-        "reason": record["request"].get("reason", ""),
-        "verdict": record["verdict"],
-        "reasons": record["reasons"],
-        "status": record["status"],
-        "explanation": record["explanation"],
-        "catalog": record["request"].get("catalog"),
-        "risk_signal": record["risk_signal"],
-        "approved_by": record["approved_by"],
-        "paypal_batch_id": payout.get("paypal_batch_id"),
-        "error_name": record["error_name"],
-        "created_at": record["created_at"],
-    }
+# The dashboard and the event sinks share one public shape for a decision.
+_public = public_record
 
 
 def build_state(gate: PaymentGate) -> dict[str, Any]:
@@ -107,9 +93,22 @@ def simulate(gate: PaymentGate, scenario: str) -> dict[str, Any]:
     return _public(gate.process(request, task_text=details["reason"]))
 
 
-def make_handler(gate: PaymentGate, token: str) -> type[BaseHTTPRequestHandler]:
+def demo_pages_enabled() -> bool:
+    return os.getenv("LEASH_DEMO_PAGES", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def public_hosts_from_env() -> list[str]:
+    """Host names the dashboard answers to besides loopback (comma-separated)."""
+    raw = os.getenv("LEASH_PUBLIC_HOST", "")
+    return [host.strip().lower() for host in raw.split(",") if host.strip()]
+
+
+def make_handler(
+    gate: PaymentGate, token: str, public_hosts: list[str] | None = None
+) -> type[BaseHTTPRequestHandler]:
     if not token:
         raise ValueError("the dashboard needs a non-empty token")
+    public = {host.lower() for host in public_hosts or []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_: object) -> None:  # keep the terminal quiet
@@ -132,9 +131,11 @@ def make_handler(gate: PaymentGate, token: str) -> type[BaseHTTPRequestHandler]:
             return {f"127.0.0.1:{port}", f"localhost:{port}"}
 
         def _local_host(self) -> bool:
-            # Pin Host to the loopback names. Checking Origin against whatever
+            # Pin Host to the loopback names, plus the public names this
+            # deployment was configured with. Checking Origin against whatever
             # Host the request claims would let a DNS-rebinding page through.
-            return self.headers.get("Host", "") in self._allowed_hosts()
+            host = self.headers.get("Host", "").lower()
+            return host in self._allowed_hosts() or host in public
 
         def _authorized(self) -> bool:
             sent = self.headers.get(TOKEN_HEADER, "")
@@ -146,16 +147,31 @@ def make_handler(gate: PaymentGate, token: str) -> type[BaseHTTPRequestHandler]:
             if "application/json" not in self.headers.get("Content-Type", ""):
                 return False
             origin = self.headers.get("Origin")
-            return origin is None or origin in {
-                f"http://{host}" for host in self._allowed_hosts()
-            }
+            allowed = {f"http://{host}" for host in self._allowed_hosts()}
+            allowed |= {f"https://{host}" for host in public}
+            return origin is None or origin.lower() in allowed
 
         def do_GET(self) -> None:  # noqa: N802
+            if self.path == "/healthz":
+                # For the host's health checker, which uses its own Host
+                # header. It reveals nothing but that the process is up.
+                self._json(200, {"ok": True})
+                return
             if not self._local_host():
                 self._json(403, {"error": "forbidden"})
                 return
             if self.path in {"/", "/index.html"}:
                 self._send(200, PAGE_PATH.read_bytes(), "text/html; charset=utf-8")
+            elif self.path.startswith(browser.DEMO_PREFIX) and demo_pages_enabled():
+                # A fake hostile listing for the prompt-injection demo.
+                listing = browser.demo_listing(self.path[len(browser.DEMO_PREFIX):])
+                if listing is None:
+                    self._json(404, {"error": "not_found"})
+                else:
+                    self._send(
+                        200, browser.render_listing_page(listing).encode(),
+                        "text/html; charset=utf-8",
+                    )
             elif self.path == "/api/state":
                 if not self._authorized():
                     self._json(401, {"error": "token_required"})
@@ -206,19 +222,61 @@ def _reconcile_forever(gate: PaymentGate, stop: threading.Event) -> None:
             logger.warning("Reconcile failed: %s", error.__class__.__name__)
 
 
-def main() -> int:
-    config.configure()
-    port = int(os.getenv("LEASH_DASHBOARD_PORT", "8787"))
-    gate = PaymentGate(
+def dashboard_token() -> tuple[str, bool]:
+    """The approval token, and whether it came from the environment.
+
+    On a remote host nobody sees the startup output, so the token is set as a
+    secret (LEASH_DASHBOARD_TOKEN). Locally a fresh one is made each run.
+    """
+    configured = os.getenv("LEASH_DASHBOARD_TOKEN", "").strip()
+    if configured:
+        if len(configured) < 16:
+            raise SystemExit("LEASH_DASHBOARD_TOKEN must be at least 16 characters")
+        return configured, True
+    return secrets.token_urlsafe(32), False
+
+
+def build_server(
+    gate: PaymentGate, *, host: str | None = None, port: int | None = None,
+    token: str | None = None,
+) -> tuple[ThreadingHTTPServer, str, bool]:
+    host = host or os.getenv("LEASH_DASHBOARD_HOST", "127.0.0.1")
+    if port is None:
+        port = int(os.getenv("PORT") or os.getenv("LEASH_DASHBOARD_PORT", "8787"))
+    from_env = False
+    if token is None:
+        token, from_env = dashboard_token()
+    public = public_hosts_from_env()
+    if host not in {"127.0.0.1", "localhost", "::1"} and not public:
+        raise SystemExit(
+            "Listening beyond loopback needs LEASH_PUBLIC_HOST, the name people use"
+        )
+    httpd = ThreadingHTTPServer((host, port), make_handler(gate, token, public))
+    return httpd, token, from_env
+
+
+def make_gate() -> PaymentGate:
+    events.install_from_env()
+    return PaymentGate(
         db_path=config.leash_db_path(),
         price_lookup=price_lookup_from_env(load_policy()["merchant_allowlist"]),
     )
+
+
+def main() -> int:
+    config.configure()
+    gate = make_gate()
     stop = threading.Event()
     threading.Thread(target=_reconcile_forever, args=(gate, stop), daemon=True).start()
-    token = secrets.token_urlsafe(32)
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(gate, token))
+    httpd, token, from_env = build_server(gate)
+    port = httpd.server_address[1]
+    public = public_hosts_from_env()
+    base = f"https://{public[0]}" if public else f"http://127.0.0.1:{port}"
     # The token is shown here only. It is never written to a file or a log.
-    print(f"Leash dashboard: http://127.0.0.1:{port}/#token={token}", flush=True)
+    if from_env:
+        print(f"Leash dashboard: {base}/#token=<LEASH_DASHBOARD_TOKEN>", flush=True)
+    else:
+        print(f"Leash dashboard: {base}/#token={token}", flush=True)
     print(
         f"PayPal mode: {config.paypal_mode()}. Open the link above; "
         "it works only while this server runs.",

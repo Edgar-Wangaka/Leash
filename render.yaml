@@ -1,0 +1,44 @@
+# Render Blueprint: one web service runs the dashboard, the reconcile poller
+# and the remote MCP endpoint, so all three share one SQLite file on one disk.
+#
+# Secrets marked sync: false are entered in the Render dashboard, never here.
+services:
+  - type: web
+    name: leash
+    runtime: python
+    # Free plan: no disk, so leash.db is wiped on each deploy and the service
+    # sleeps when idle. For a persistent log, switch to `plan: starter`
+    # (~$7/month), add the disk below and point both DB paths at it:
+    #   disk: {name: leash-data, mountPath: /var/data, sizeGB: 1}
+    #   LEASH_DB_PATH=/var/data/leash.db  PAYOUTS_DB_PATH=/var/data/payouts.db
+    plan: free
+    buildCommand: pip install ".[remote]"
+    startCommand: python -m leash.remote
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: DRY_RUN
+        value: "true"
+      - key: LEASH_PUBLIC_HOST
+        sync: false          # e.g. leash.onrender.com or your custom domain
+      - key: LEASH_DASHBOARD_TOKEN
+        sync: false          # the human's approval token
+      - key: LEASH_MCP_TOKEN
+        sync: false          # the agent's token; must differ from the above
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
+      - key: CHANNEL3_API_KEY
+        sync: false
+      - key: ZAPIER_HOOK_URL
+        sync: false
+      - key: ELASTIC_URL
+        sync: false
+      - key: ELASTIC_API_KEY
+        sync: false
+      - key: KERNEL_API_KEY
+        sync: false

@@ -11,3 +11,4 @@ leash.db
 *.db-journal
 *-dry-run.db
 submission/
+*.db
