@@ -30,8 +30,29 @@ P1 deployable dashboard · P2 persistent state · P3 remote MCP · P4 demo harde
 - Tests: public host + https Origin + token approves; no token → 401; `http://` Origin for the public host → 403; foreign and look-alike hosts → 403; health check answers any Host; env/random token; `0.0.0.0` without a public host refused; transport switch (stdio default, http runs uvicorn behind the guard, unknown name refused); token equality and absence refused; real MCP `initialize` + `tools/list` over HTTP lists exactly the three tools; the front serves the page, forwards approve, refuses the agent token and routes `/mcp`.
 - Live local smoke run of `python -m leash.remote` on port 18080: `/healthz` 200, page 200, state 401 without token / 200 with it, attack simulate 200 (blocked), `/mcp` 401 without bearer / 200 `initialize` with it.
 
+## Live deploy (2026-11-11)
+- Service `leash` (`srv-dbq92hm7bikc73db2g30`), free plan, Oregon, branch `sponsor-integrations`, `DRY_RUN=true`: https://leash-1pqh.onrender.com
+- Commit `59ae6d9` is live. Probed with no real tokens:
+
+| Check | Result |
+|---|---|
+| `GET /healthz` | 200 `{"ok":true}` |
+| `GET /` (dashboard page) | 200 |
+| `GET /api/state` without token | 401 |
+| `POST /api/approve` without token / wrong token | 401 / 401 |
+| `POST /api/approve` with a cross-site Origin | 403 |
+| `POST /mcp` without bearer / wrong bearer | 401 / 401 |
+| `GET /demo/listing/premium-birthday-gift-box` | 200 |
+
+### Problems hit on the way
+1. **Tokens saved as Secret Files.** Render's Secret Files are files under `/etc/secrets/`, not env vars, so the startup check refused to run. Fixed by moving them to Environment Variables. The check worked as intended.
+2. **`config/` not found (bug, fixed in `59ae6d9`).** Render installs the package non-editably into `site-packages`, so paths built from `__file__` pointed into the virtualenv. `config.py` now resolves the project root once: `LEASH_PROJECT_ROOT`, else the source checkout, else the working directory. Two regression tests were added and a non-editable install was checked locally.
+3. **Auto-deploy didn't fire on push.** The service was created from the repo URL, so Render has no GitHub webhook. The deploy was started through the API instead.
+
 ## Not done (needs you)
-- Creating the Render service, entering secrets, and choosing Starter vs free.
+- Connect the Render GitHub app to `Edgar-Wangaka/Leash` so pushes deploy themselves (or keep deploying by hand).
+- Set **Health Check Path** to `/healthz` in Settings, if not already done.
+- Approve a held request through the live dashboard with your token, and connect Claude Desktop to `/mcp` with the agent token. I can't do either without the tokens.
 - Custom domain from the Student Pack and its DNS.
 - Keeping the instance warm during judging (only needed on the free plan; an uptime pinger hitting `/healthz` works).
 - Connecting Claude Desktop to the deployed URL.
