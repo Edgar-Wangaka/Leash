@@ -157,14 +157,14 @@
   </header>
 
   <form id="signin" hidden autocomplete="on">
-    <label for="tokenInput">Dashboard token</label>
+    <label for="tokenInput">Access token</label>
     <div class="row">
       <input id="tokenInput" name="password" type="password" autocomplete="current-password" required
         spellcheck="false" placeholder="Paste your token">
       <button class="sign" type="submit">Open dashboard</button>
     </div>
-    <p>On Render this is <b>LEASH_DASHBOARD_TOKEN</b> from the Environment tab. On your own machine it is
-      in the link the dashboard prints when it starts. It is kept in this browser tab only.</p>
+    <p>Judging? Use the access token from our submission. It lets you approve payments and
+      change limits, with test money only. It stays in this tab and is gone when you close it.</p>
     <div class="bad" id="signinError" role="alert"></div>
   </form>
 
@@ -505,11 +505,11 @@
 
   // No token, or a wrong one: ask for it here instead of needing a terminal.
   function askForToken(rejected) {
-    $("mode").textContent = "Sign in with your dashboard token"; $("mode").className = "down";
+    $("mode").textContent = "Sign in to approve payments"; $("mode").className = "down";
     $("signout").hidden = true;
     const form = $("signin"), wasHidden = form.hidden;
     form.hidden = false;
-    $("signinError").textContent = rejected ? "That token did not work. Check it and try again." : "";
+    $("signinError").textContent = rejected ? "That token didn't work. Check for a missing character and try again." : "";
     if (wasHidden) $("tokenInput").focus();
   }
   $("signin").onsubmit = (event) => {

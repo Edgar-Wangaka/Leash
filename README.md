@@ -356,6 +356,24 @@ How it behaves:
   changes. If a URL is set but `psycopg` is missing, Leash refuses to start
   rather than quietly going back to `leash.db`.
 
+The same database also keeps the **payment log**: every decision, the PayPal
+payout records that stop a payment being sent twice, and Channel3 price
+changes. So a Render restart or deploy loses nothing. The details:
+- **Which copies use it:** only the dashboard (`python -m leash.dashboard`,
+  `python -m leash.remote`) and the MCP server. Demos and tests always use a
+  local file, so a scripted run never lands in the real log.
+- **Separation:** each copy works in its own Postgres schema, named like its
+  limits namespace (`leash_local` on your laptop, `leash_render` with
+  `LEASH_SETTINGS_NAMESPACE=render`). A laptop and Render sharing one Neon
+  database never see each other's payments.
+- **Same rules:** the checks that stop two approvals paying twice and two
+  requests overspending the budget hold in Postgres too.
+  `tests/test_db_postgres.py` runs them against a disposable database when
+  `LEASH_TEST_DATABASE_URL` is set (use a Neon branch, never production).
+- **Your laptop:** with `DATABASE_URL` in `.env`, a local dashboard writes to
+  the same Neon database, in the `leash_local` schema. To keep a purely local
+  run, start it with `DATABASE_URL=` (empty).
+
 ## Tests
 
 ```bash

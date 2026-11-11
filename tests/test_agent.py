@@ -787,7 +787,7 @@ def test_older_hold_text_is_cleaned_once_the_hold_is_settled(tmp_path):
 def test_gate_closes_every_database_connection(tmp_path, monkeypatch):
     import sqlite3
 
-    import leash.gate as gate_module
+    import leash.db as db_module
 
     opened, real_connect = [], sqlite3.connect
 
@@ -803,7 +803,7 @@ def test_gate_closes_every_database_connection(tmp_path, monkeypatch):
         opened.append(connection)
         return connection
 
-    monkeypatch.setattr(gate_module.sqlite3, "connect", connect)
+    monkeypatch.setattr(db_module.sqlite3, "connect", connect)
     with PaymentGate(
         db_path=str(tmp_path / "leash.db"),
         payout_client=FakePayout(),

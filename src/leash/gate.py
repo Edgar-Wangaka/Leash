@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
+
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator
 from payouts.paypal_client import PayPalClient
 
 from . import events
+from .db import Database, PostgresDatabase, SqliteDatabase
 from .explainer import current_explanation, explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
 from .settings import LiveSettings, SettingsStore, store_from_env
@@ -68,8 +69,12 @@ class PaymentGate:
         price_lookup: Callable[[str], dict[str, Any]] | None = None,
         on_event: Callable[[str, dict[str, Any]], None] | None = None,
         settings_store: SettingsStore | None = None,
+        database: Database | None = None,
     ) -> None:
         self.db_path = db_path
+        # The payment log: db_path (SQLite), or the hosted Postgres the
+        # dashboard and MCP server pass in (see leash.db).
+        self._db = database or SqliteDatabase(db_path)
         # Told about each committed decision change. It sees a copy of the
         # record after the fact and cannot change the outcome.
         self._on_event = on_event if on_event is not None else events.emit
@@ -78,7 +83,11 @@ class PaymentGate:
         self.settings = LiveSettings(
             load_policy(policy_path), settings_store or store_from_env(db_path)
         )
-        self.payout_client = payout_client or PayPalClient()
+        # The payout client's idempotency records live next to the decisions,
+        # so a hosted restart never forgets that a payout was sent.
+        self.payout_client = payout_client or PayPalClient(
+            database=self._db if isinstance(self._db, PostgresDatabase) else None
+        )
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._risk_signal = risk_signal or llm_risk_signal
         # Looks a product up in the catalog. None means no catalog is configured.
@@ -104,19 +113,10 @@ class PaymentGate:
         )
 
     @contextmanager
-    def _connect(self, timeout: float = 5.0) -> Iterator[sqlite3.Connection]:
-        """A connection that commits (or rolls back) and then closes.
-
-        ``with sqlite3.connect(...)`` alone only commits; the connection stays
-        open until garbage collection, and a dashboard polling every 1.5 s
-        piles up open database handles.
-        """
-        connection = sqlite3.connect(self.db_path, timeout=timeout)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+    def _connect(self, timeout: float = 5.0) -> Iterator[Any]:
+        """A connection that commits (or rolls back) and then closes or returns."""
+        with self._db.connect(timeout=timeout) as connection:
+            yield connection
 
     def close(self) -> None:
         close = getattr(self.payout_client, "close", None)
@@ -207,7 +207,7 @@ class PaymentGate:
             return self._result(False, "expired", "approval_expired", request_id)
 
         with self._connect(timeout=30) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._db.begin_exclusive(connection, "decisions")
             claimed = connection.execute(
                 """
                 UPDATE decisions
@@ -258,7 +258,7 @@ class PaymentGate:
             return self._result(False, "rejected", "denier_is_requesting_agent", request_id)
 
         with self._connect(timeout=30) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._db.begin_exclusive(connection, "decisions")
             claimed = connection.execute(
                 """
                 UPDATE decisions
@@ -449,7 +449,7 @@ class PaymentGate:
                 rows = connection.execute(
                     "SELECT kind, domain, previous_json, current_json, event_time "
                     "FROM price_events WHERE product_id = ? AND event_time >= ? "
-                    "AND (? IS NULL OR domain IS NULL OR domain = ?) "
+                    "AND (CAST(? AS TEXT) IS NULL OR domain IS NULL OR domain = ?) "
                     "ORDER BY event_time",
                     (product_id, created_at, sold_by, sold_by),
                 ).fetchall()
@@ -512,7 +512,7 @@ class PaymentGate:
 
         if not already_claimed:
             with self._connect(timeout=30) as connection:
-                connection.execute("BEGIN IMMEDIATE")
+                self._db.begin_exclusive(connection, "decisions")
                 claimed = connection.execute(
                     "UPDATE decisions SET status = 'paying' "
                     "WHERE request_id = ? AND status = 'pending'",
@@ -583,7 +583,7 @@ class PaymentGate:
         self, request: PaymentRequest, catalog: dict[str, Any] | None = None
     ) -> tuple[Decision | None, dict[str, Any] | None]:
         with self._connect(timeout=30) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            self._db.begin_exclusive(connection, "decisions")
             existing = connection.execute(
                 "SELECT request_id FROM decisions WHERE request_id = ?",
                 (request.request_id,),
@@ -602,60 +602,57 @@ class PaymentGate:
 
     def _state(
         self,
-        connection: sqlite3.Connection | None = None,
+        connection: Any | None = None,
         *,
         exclude_request_id: str | None = None,
     ) -> dict[str, Any]:
-        owns = connection is None
-        connection = connection or sqlite3.connect(self.db_path)  # closed below
+        if connection is None:
+            with self._connect() as owned:
+                return self._state(owned, exclude_request_id=exclude_request_id)
         # created_at is stored as a UTC ISO-8601 string, so the window cutoffs
         # must be in the same format for the string comparison to be correct.
         now = self._now().astimezone(timezone.utc)
         day_ago = (now - timedelta(days=1)).isoformat()
         minute_ago = (now - timedelta(minutes=1)).isoformat()
-        try:
-            # Money counts against the budget from the moment it is committed:
-            # an allowed request when it is reserved (created_at), a human hold
-            # when an approval claims it (approved_at). Windowing a hold on its
-            # creation time would let one approved late drop out of the budget
-            # early. Unclaimed payouts have left the account, so they count too.
-            rows = connection.execute(
-                """
-                SELECT request_id, amount_cents, status
-                FROM decisions
-                WHERE request_id IS NOT ?
-                  AND (
-                    (verdict = 'allow' AND created_at >= ? AND status IN (
-                        'pending', 'paying', 'submitted', 'needs_reconcile',
-                        'paid', 'unclaimed'))
-                    OR (verdict = 'hold_for_human' AND approved_at >= ? AND status IN (
-                        'paying', 'submitted', 'needs_reconcile', 'paid', 'unclaimed'))
-                  )
-                """,
-                (exclude_request_id, day_ago, day_ago),
-            ).fetchall()
-            recent = connection.execute(
-                "SELECT COUNT(*) FROM decisions WHERE created_at >= ?",
-                (minute_ago,),
-            ).fetchone()[0]
-            return {
-                "policy": self.policy,
-                "daily_spend_usd": sum(
-                    (Decimal(cents) / Decimal(100) for _, cents, _ in rows), Decimal("0")
-                ),
-                "recent_request_count": recent,
-                "seen_request_ids": {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT request_id FROM decisions WHERE created_at >= ?",
-                        (day_ago,),
-                    ).fetchall()
-                },
-                "approved_task_ids": set(self.policy.get("approved_task_ids", [])),
-            }
-        finally:
-            if owns:
-                connection.close()
+        # Money counts against the budget from the moment it is committed:
+        # an allowed request when it is reserved (created_at), a human hold
+        # when an approval claims it (approved_at). Windowing a hold on its
+        # creation time would let one approved late drop out of the budget
+        # early. Unclaimed payouts have left the account, so they count too.
+        rows = connection.execute(
+            """
+            SELECT request_id, amount_cents, status
+            FROM decisions
+            WHERE request_id IS NOT ?
+              AND (
+                (verdict = 'allow' AND created_at >= ? AND status IN (
+                    'pending', 'paying', 'submitted', 'needs_reconcile',
+                    'paid', 'unclaimed'))
+                OR (verdict = 'hold_for_human' AND approved_at >= ? AND status IN (
+                    'paying', 'submitted', 'needs_reconcile', 'paid', 'unclaimed'))
+              )
+            """,
+            (exclude_request_id, day_ago, day_ago),
+        ).fetchall()
+        recent = connection.execute(
+            "SELECT COUNT(*) FROM decisions WHERE created_at >= ?",
+            (minute_ago,),
+        ).fetchone()[0]
+        return {
+            "policy": self.policy,
+            "daily_spend_usd": sum(
+                (Decimal(cents) / Decimal(100) for _, cents, _ in rows), Decimal("0")
+            ),
+            "recent_request_count": recent,
+            "seen_request_ids": {
+                row[0]
+                for row in connection.execute(
+                    "SELECT request_id FROM decisions WHERE created_at >= ?",
+                    (day_ago,),
+                ).fetchall()
+            },
+            "approved_task_ids": set(self.policy.get("approved_task_ids", [])),
+        }
 
     def _hard_recheck(self, record: dict[str, Any] | None) -> list[str]:
         if not record:
@@ -674,6 +671,9 @@ class PaymentGate:
         return reasons
 
     def _initialize_database(self) -> None:
+        if isinstance(self._db, PostgresDatabase):
+            self._initialize_postgres()
+            return
         with self._connect() as connection:
             connection.execute(
                 """
@@ -743,9 +743,60 @@ class PaymentGate:
                 "ON price_events(product_id, event_time)"
             )
 
+    def _initialize_postgres(self) -> None:
+        """The same tables in Postgres. seq stands in for SQLite's rowid."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS decisions (
+                    seq BIGSERIAL,
+                    request_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    merchant_email TEXT NOT NULL,
+                    amount_cents BIGINT,
+                    amount_usd TEXT,
+                    verdict TEXT NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    policy_snapshot_json TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    payout_json TEXT,
+                    error_name TEXT,
+                    risk_signal TEXT NOT NULL DEFAULT 'none',
+                    risk_reason TEXT NOT NULL DEFAULT '',
+                    explanation TEXT NOT NULL DEFAULT '',
+                    approved_by TEXT,
+                    approved_at TEXT,
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at, seq)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_events (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    domain TEXT,
+                    previous_json TEXT,
+                    current_json TEXT,
+                    event_time TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_price_events_product "
+                "ON price_events(product_id, event_time)"
+            )
+
     def _insert_decision(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
         request: PaymentRequest,
         decision: Decision,
         status: str,
@@ -794,7 +845,7 @@ class PaymentGate:
         )
 
     def _get_decision(
-        self, request_id: str, connection: sqlite3.Connection | None = None
+        self, request_id: str, connection: Any | None = None
     ) -> dict[str, Any] | None:
         if connection is None:
             with self._connect() as owned:

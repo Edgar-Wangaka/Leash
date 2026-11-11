@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -28,8 +27,16 @@ class PayPalClient:
         http_client: httpx.Client | None = None,
         sleep: Any = time.sleep,
         monotonic: Any = time.monotonic,
+        database: Any | None = None,
     ) -> None:
         self.db_path = db_path or os.getenv("PAYOUTS_DB_PATH", "payouts.db")
+        # Local idempotency records: payouts.db, or the gate's hosted Postgres
+        # (leash.db.PostgresDatabase), so a restart never forgets a payout.
+        if database is None:
+            from leash.db import SqliteDatabase  # local import: payouts stays usable alone
+
+            database = SqliteDatabase(self.db_path)
+        self._db = database
         self._http = http_client or httpx.Client()
         self._owns_http_client = http_client is None
         self._sleep = sleep
@@ -58,7 +65,7 @@ class PayPalClient:
         return os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
 
     def _initialize_database(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._db.connect() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS payouts (
@@ -160,7 +167,7 @@ class PayPalClient:
             )
         if local is None:
             return self._save_record(idempotency_key, status, batch_id, error_name)
-        with sqlite3.connect(self.db_path) as connection:
+        with self._db.connect() as connection:
             connection.execute(
                 "UPDATE payouts SET status = ?, paypal_batch_id = ?, error_name = ? "
                 "WHERE idempotency_key = ?",
@@ -355,7 +362,7 @@ class PayPalClient:
         return f"{amount:.2f}"
 
     def _get_record(self, idempotency_key: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._db.connect() as connection:
             row = connection.execute(
                 """
                 SELECT idempotency_key, status, paypal_batch_id, error_name, created_at
@@ -373,7 +380,7 @@ class PayPalClient:
         error_name: str | None,
     ) -> dict[str, Any]:
         created_at = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(self.db_path) as connection:
+        with self._db.connect() as connection:
             connection.execute(
                 """
                 INSERT OR IGNORE INTO payouts
@@ -387,7 +394,7 @@ class PayPalClient:
     def _update_by_batch_id(
         self, paypal_batch_id: str, status: str, error_name: str | None
     ) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._db.connect() as connection:
             connection.execute(
                 """
                 UPDATE payouts SET status = ?, error_name = ?

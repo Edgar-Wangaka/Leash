@@ -19,6 +19,7 @@ from mcp.server.mcpserver import MCPServer
 from . import config, events
 from .agent import ProductSearcher
 from .catalog import price_lookup_from_env
+from .db import database_from_env
 from .gate import PaymentGate
 from .policy import PaymentRequest, load_policy
 
@@ -44,6 +45,7 @@ def _get_gate() -> PaymentGate:
         _gate = PaymentGate(
             db_path=config.leash_db_path(),
             price_lookup=price_lookup_from_env(load_policy()["merchant_allowlist"]),
+            database=database_from_env(config.leash_db_path()),
         )
     return _gate
 

@@ -29,6 +29,7 @@ from typing import Any
 
 from . import browser, config, events, price_watch, settings
 from .catalog import price_lookup_from_env
+from .db import database_from_env
 from .events import public_record
 from .gate import PaymentGate
 from .policy import PaymentRequest, load_policy
@@ -383,6 +384,8 @@ def make_gate() -> PaymentGate:
     return PaymentGate(
         db_path=config.leash_db_path(),
         price_lookup=price_lookup_from_env(load_policy()["merchant_allowlist"]),
+        # Hosted Postgres when a database URL is set, so the log survives restarts.
+        database=database_from_env(config.leash_db_path()),
     )
 
 
