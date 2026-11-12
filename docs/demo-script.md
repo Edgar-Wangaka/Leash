@@ -27,8 +27,7 @@ timings below are after the cuts. This script matches the rehearsal in
    and doesn't pay anything). If the reply is slow, Gemini is busy. Wait a
    minute and try again.
 8. **Mind the rate limit.** The agent box allows 3 runs a minute. Wait about
-   20 seconds between takes, and click each button once: the example buttons
-   aren't disabled while a run is going.
+   20 seconds between takes. The agent buttons grey out while a run is going.
 
 **If Gemini is slow or down:** the agent box falls back to Leash's rule-based
 agent and says so on screen. Record the hijack, ledger and limits parts
@@ -58,7 +57,7 @@ the "Buy on hallmark.com" link.]
 
 **0:30 to 0:48. A purchase that needs a person**
 
-[Click **$60 hamper**. Cut the wait. It usually picks a basket near $50.]
+[Click **Gift hamper**. Cut the wait. It usually picks a basket near $50.]
 
 "This one is over the $40 approval threshold, so Leash holds it."
 

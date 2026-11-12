@@ -34,7 +34,8 @@ money, and the products are real listings from Channel3.
 1. Under "Ask the agent to buy something", click **Small gift**. A Gemini
    model searches Channel3 and asks Leash to pay. A card under $15 is paid at
    once, and the row shows PayPal's batch and transaction IDs.
-2. Click **$60 hamper**. Leash holds it because it is over the $40 approval
+2. Click **Gift hamper**. The agent looks for a hamper around $60 (it usually
+   finds one near $50), and Leash holds it because it is over the $40 approval
    threshold. Approve or deny it under "Waiting for your approval".
 3. Click **Over the cap**. The agent tries to buy a $299.99 mixer and Leash
    blocks it (the cap is $100). Gemini often then tries a "partial payment"

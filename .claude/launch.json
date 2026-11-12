@@ -37,6 +37,7 @@
         "LEASH_SETTINGS_DATABASE_URL=",
         "LEASH_SETTINGS_DATABASE_URL_UNPOOLED=",
         "LEASH_DEMO_TOKEN=local-judge-token-0001",
+        "PYTHONPATH=src",
         ".venv/bin/python",
         "-m",
         "leash.dashboard"

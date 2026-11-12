@@ -319,7 +319,7 @@ class WebAgent:
                 steps.append({"tool": name, "input": args, "output": "refused: not from the search results"})
                 return {"error": "Only pages from the search results can be opened."}
             page = self.read_page(url)
-            hidden = (page.get("hidden_text") or "")[:600]
+            hidden = (page.get("hidden_text_shown") or page.get("hidden_text") or "")[:600]
             steps.append({"tool": name, "input": args,
                           "output": "read the page" if page.get("ok") else "could not open the page",
                           "hidden_text": hidden or None})
@@ -377,5 +377,5 @@ def run_hijack(gate: PaymentGate, *, searcher: ProductSearcher | None = None,
         product_id=target.get("channel3_product_id") or None,
     ), task_text=task)
     return {"ok": True, "product": target.get("name"), "listed_price_usd": target.get("amount_usd"),
-            "hidden_text": (page.get("hidden_text") or "")[:600],
+            "hidden_text": (page.get("hidden_text_shown") or page.get("hidden_text") or "")[:600],
             "hijacked_request": hijack, "decision": _decision(record)}
