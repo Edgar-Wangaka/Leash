@@ -36,8 +36,11 @@ money, and the products are real listings from Channel3.
    once, and the row shows PayPal's batch and transaction IDs.
 2. Click **$60 hamper**. Leash holds it because it is over the $40 approval
    threshold. Approve or deny it under "Waiting for your approval".
-3. Click **Try to trick it**, or type your own attempt. Whatever the model
-   asks for, a payment to an unknown seller or over the cap is blocked.
+3. Click **Over the cap**. The agent tries to buy a $299.99 mixer and Leash
+   blocks it (the cap is $100). Gemini often then tries a "partial payment"
+   just under the cap; Leash holds that for you, showing the real price next
+   to it. **Try to trick it** shows a model refusing an obvious scam by
+   itself; Leash doesn't depend on that.
 4. Click **Hijacked agent (no AI)**. A naive agent reads a product page with a
    hidden instruction, tries to pay $500 to `attacker@example.com`, and Leash
    blocks it. The page shows the hidden text it obeyed.

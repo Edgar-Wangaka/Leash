@@ -49,7 +49,10 @@ this address. The agent obeys it."
 "Leash blocks it: unknown seller, over the cap, over the budget. Nothing
 reached PayPal. The agent was fooled; the money didn't move."
 
-[Optional, if time allows: click **Try to trick it** and show the block.]
+[Optional, if time allows: click **Over the cap**. The agent tries $299.99:
+blocked. It may then try a $99.99 "partial payment": held, with the real price
+shown next to it. "Even when the agent tries to get around a limit, a person
+decides."]
 
 **1:30 to 1:50. The human stays in charge**
 
