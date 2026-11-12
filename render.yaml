@@ -47,10 +47,6 @@ services:
       # Channel3 dashboard's webhook portal. Turns on the price watch.
       - key: CHANNEL3_WEBHOOK_SECRET
         sync: false
-      - key: ELASTIC_URL
-        sync: false
-      - key: ELASTIC_API_KEY
-        sync: false
       - key: KERNEL_API_KEY
         sync: false
       - key: LEASH_SETTINGS_DATABASE_URL

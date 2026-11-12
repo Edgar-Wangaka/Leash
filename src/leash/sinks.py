@@ -46,6 +46,10 @@ def elastic_url_from_cloud_id(cloud_id: str) -> str:
 class ElasticSink:
     """Index every event into an Elasticsearch index as an audit log.
 
+    Optional, and not part of the hackathon entry: it is off unless
+    ELASTIC_URL (or ELASTIC_CLOUD_ID) and ELASTIC_API_KEY are set, and it has
+    not been run against a live cluster.
+
     The document id is ``<request_id>:<event>``, so a retried event replaces
     its own document instead of adding a duplicate. Talks to the REST API
     with httpx, so it needs no extra package.
