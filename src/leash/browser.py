@@ -148,7 +148,10 @@ def split_html(page: str) -> dict[str, str]:
     parser = _Splitter()
     parser.feed(page)
     parser.close()
-    return {"visible_text": " ".join(parser.visible), "hidden_text": " ".join(parser.hidden)}
+    # hidden_text keeps every hiding place; hidden_text_shown is for people, and a
+    # page often hides the same sentence twice (a comment and white text).
+    return {"visible_text": " ".join(parser.visible), "hidden_text": " ".join(parser.hidden),
+            "hidden_text_shown": " ".join(dict.fromkeys(parser.hidden))}
 
 
 # --- browsing ------------------------------------------------------------------

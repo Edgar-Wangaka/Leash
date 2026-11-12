@@ -56,6 +56,7 @@ def test_demo_page_hides_the_instruction_from_people():
     assert LISTING["name"] in result["visible_text"]
     assert "attacker@example.com" not in result["visible_text"]
     assert result["hidden_text"].count("attacker@example.com") == 2  # comment + white text
+    assert result["hidden_text_shown"].count("attacker@example.com") == 1  # shown to people once
 
 
 def test_demo_page_escapes_listing_text():
@@ -115,7 +116,7 @@ def test_other_urls_are_fetched_over_http(monkeypatch):
 
     assert result == {
         "url": "https://shop.example/item", "ok": True, "engine": "local",
-        "visible_text": "hi", "hidden_text": "psst",
+        "visible_text": "hi", "hidden_text": "psst", "hidden_text_shown": "psst",
     }
 
 

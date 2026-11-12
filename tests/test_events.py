@@ -238,7 +238,7 @@ def test_unknown_event_kind_is_dropped():
 
 
 def test_install_from_env_is_a_no_op_without_env(monkeypatch):
-    for name in ("ELASTIC_CLOUD_ID", "ELASTIC_URL", "ELASTIC_API_KEY"):
+    for name in ("CHANNEL3_API_KEY", "CHANNEL3_WEBHOOK_SECRET"):
         monkeypatch.delenv(name, raising=False)
     assert events.install_from_env() == []
     assert events.install_from_env() == []  # second call does nothing
