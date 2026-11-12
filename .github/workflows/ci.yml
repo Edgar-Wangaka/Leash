@@ -43,5 +43,6 @@ jobs:
       - name: Run the collection
         run: >
           npx -y newman@6.2.1 run postman/leash.postman_collection.json
+          --folder "Happy path" --folder "Attacks"
           -e postman/local.postman_environment.json
           --env-var dashboardToken=$LEASH_DASHBOARD_TOKEN

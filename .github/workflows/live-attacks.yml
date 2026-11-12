@@ -1,0 +1,31 @@
+# Every night, run the Postman "Live attacks (no token)" folder against the
+# public deployment. Each request must be refused (401/403), except the health
+# check and the public demo page. Needs no secrets: it never signs in.
+#
+# GitHub runs scheduled workflows only from the default branch (main).
+name: live-attacks
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  newman:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Wake the free server
+        run: curl -s -o /dev/null --max-time 90 https://www.agentleash.me/healthz || true
+      - name: Run the live attack checks
+        run: >
+          npx -y newman@6.2.1 run postman/leash.postman_collection.json
+          --folder "Live attacks (no token)"
+          -e postman/render.postman_environment.json

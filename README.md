@@ -219,6 +219,13 @@ To run only the MCP server over HTTP on your own machine, set
 
 ## API spec and attack tests (Postman)
 
+[![Run in Postman](https://run.pstmn.io/button.svg)](https://app.getpostman.com/run-collection/59387021-212e4c48-f29a-4b46-9b4d-3151e416cdc9?action=collection%2Ffork&source=rip_markdown&collection-url=entityId%3D59387021-212e4c48-f29a-4b46-9b4d-3151e416cdc9%26entityType%3Dcollection%26workspaceId%3D8ebb3b4e-6964-4ee0-aba7-3a290a44eaa8)
+
+The button opens the collection in the "Leash" Postman workspace (it works
+once that workspace is public). Its "Live attacks (no token)" folder runs
+against https://www.agentleash.me with no secrets, and a GitHub Actions job
+runs it every night (`.github/workflows/live-attacks.yml`).
+
 The dashboard API is described in `docs/openapi.yaml` (OpenAPI 3.1). The
 Postman collection in `postman/` has two folders:
 
