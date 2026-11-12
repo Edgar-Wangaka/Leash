@@ -469,19 +469,22 @@ class PaymentGate:
                     alerts[request_id] = latest
         return alerts
 
-    def record_agent_run(self, at: datetime) -> None:
+    def record_agent_run(self, at: datetime, who: str = "unknown") -> None:
         with self._connect() as connection:
             connection.execute(
-                "INSERT INTO agent_runs (started_at) VALUES (?)",
-                (at.astimezone(timezone.utc).isoformat(),),
+                "INSERT INTO agent_runs (started_at, who) VALUES (?, ?)",
+                (at.astimezone(timezone.utc).isoformat(), who),
             )
 
-    def count_agent_runs(self, since: datetime) -> int:
+    def count_agent_runs(self, since: datetime, who: str | None = None) -> int:
+        """Runs since ``since``: everyone's, or one token holder's."""
+        query = "SELECT COUNT(*) FROM agent_runs WHERE started_at >= ?"
+        params: tuple = (since.astimezone(timezone.utc).isoformat(),)
+        if who is not None:
+            query += " AND who = ?"
+            params += (who,)
         with self._connect() as connection:
-            return int(connection.execute(
-                "SELECT COUNT(*) FROM agent_runs WHERE started_at >= ?",
-                (since.astimezone(timezone.utc).isoformat(),),
-            ).fetchone()[0])
+            return int(connection.execute(query, params).fetchone()[0])
 
     def has_pending_hold_for(self, product_id: str) -> bool:
         with self._connect() as connection:
@@ -758,8 +761,16 @@ class PaymentGate:
             )
             # One row per "Ask the agent" run, for the per-minute and daily caps.
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS agent_runs (started_at TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS agent_runs "
+                "(started_at TEXT NOT NULL, who TEXT NOT NULL DEFAULT 'unknown')"
             )
+            run_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(agent_runs)").fetchall()
+            }
+            if "who" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN who TEXT NOT NULL DEFAULT 'unknown'"
+                )
 
     def _initialize_postgres(self) -> None:
         """The same tables in Postgres. seq stands in for SQLite's rowid."""
@@ -813,7 +824,11 @@ class PaymentGate:
             )
             # One row per "Ask the agent" run, for the per-minute and daily caps.
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS agent_runs (started_at TEXT NOT NULL)"
+                "CREATE TABLE IF NOT EXISTS agent_runs "
+                "(started_at TEXT NOT NULL, who TEXT NOT NULL DEFAULT 'unknown')"
+            )
+            connection.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS who TEXT NOT NULL DEFAULT 'unknown'"
             )
 
     def _insert_decision(

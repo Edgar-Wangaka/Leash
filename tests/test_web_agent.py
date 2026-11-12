@@ -171,13 +171,42 @@ def test_the_run_stops_after_the_round_limit(tmp_path):
     assert result["decisions"] == []
 
 
-def test_a_model_outage_is_reported_and_pays_nothing(tmp_path):
+def test_a_busy_model_is_retried_once(tmp_path):
+    answers = [httpx.Response(429), httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})]
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: answers.pop(0)))
+    waits = []
+    with gate(tmp_path) as g:
+        result = WebAgent(g, searcher=Searcher(), http_client=client, model=MODEL, sleep=waits.append).run("hi")
+    assert result["ok"] and result["answer"] == "ok"
+    assert waits == [web_agent.RETRY_WAIT_SECONDS]
+
+
+def test_a_model_outage_falls_back_to_the_rule_based_agent(tmp_path):
     client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(503)))
     payout = FakePayout()
     with gate(tmp_path, payout) as g:
-        result = agent(g, client).run("buy a card")
-    assert result["ok"] is False and "did not answer" in result["error"]
-    assert payout.calls == []
+        result = WebAgent(g, searcher=Searcher(), http_client=client, model=MODEL,
+                          sleep=lambda s: None).run("buy a card")
+    assert result["ok"] and result["model_unavailable"]
+    assert "AI model is busy" in result["answer"]
+    assert result["decisions"][0]["verdict"] == "allow"
+    assert len(payout.calls) == 1
+
+
+def test_a_model_that_fails_after_a_payment_never_pays_again(tmp_path):
+    answers = [
+        httpx.Response(200, json={"choices": [{"message": {"content": None, "tool_calls": [call(
+            "request_payment", {"merchant_email": SELLER, "amount_usd": 4.99, "reason": "card",
+                                "product_id": "card1"})]}}]}),
+        httpx.Response(503), httpx.Response(503),
+    ]
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: answers.pop(0)))
+    payout = FakePayout()
+    with gate(tmp_path, payout) as g:
+        result = WebAgent(g, searcher=Searcher(), http_client=client, model=MODEL,
+                          sleep=lambda s: None).run("buy a card")
+    assert len(result["decisions"]) == 1 and "stopped answering" in result["answer"]
+    assert len(payout.calls) == 1
 
 
 @pytest.mark.parametrize("task, error", [("", "Type what"), ("x" * 301, "under 300")])
@@ -187,18 +216,39 @@ def test_bad_tasks_never_reach_the_model(tmp_path, task, error):
         assert error in agent(g, client).run(task)["error"]
 
 
-def test_runs_per_minute_and_per_day_are_capped(tmp_path):
+def test_each_person_has_their_own_per_minute_limit(tmp_path):
     now = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
     with gate(tmp_path) as g:
-        for _ in range(web_agent.RUNS_PER_MINUTE):
-            g.record_agent_run(now)
-        busy = WebAgent(g, searcher=Searcher(), model=None, now=lambda: now).run("buy a card")
-        assert "busy" in busy["error"]
+        for _ in range(web_agent.RUNS_PER_MINUTE_EACH):
+            g.record_agent_run(now, who="judge-demo")
+        judge = WebAgent(g, searcher=Searcher(), model=None, now=lambda: now, who="judge-demo")
+        assert "You've used" in judge.run("buy a card")["error"]
+        # Someone else is not held up by that judge.
+        other = WebAgent(g, searcher=Searcher(), model=None, now=lambda: now, who="human-dashboard")
+        assert other.run("buy a card")["ok"]
+
+
+def test_the_overall_minute_and_day_limits(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
+    with gate(tmp_path) as g:
+        for i in range(web_agent.RUNS_PER_MINUTE):
+            g.record_agent_run(now, who=f"person-{i}")
+        busy = WebAgent(g, searcher=Searcher(), model=None, now=lambda: now, who="new").run("buy a card")
+        assert "Lots of people" in busy["error"]
         later = now + timedelta(minutes=5)
-        for _ in range(web_agent.RUNS_PER_DAY):
-            g.record_agent_run(later - timedelta(hours=1))
-        resting = WebAgent(g, searcher=Searcher(), model=None, now=lambda: later).run("buy a card")
+        monkeypatch.setenv("LEASH_AGENT_RUNS_PER_DAY", str(web_agent.RUNS_PER_MINUTE))
+        resting = WebAgent(g, searcher=Searcher(), model=None, now=lambda: later, who="new").run("buy a card")
         assert "resting" in resting["error"]
+
+
+def test_limits_can_be_raised_by_environment(tmp_path, monkeypatch):
+    now = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setenv("LEASH_AGENT_RUNS_PER_MINUTE_EACH", "50")
+    with gate(tmp_path) as g:
+        for _ in range(web_agent.RUNS_PER_MINUTE_EACH):
+            g.record_agent_run(now, who="judge-demo")
+        agent = WebAgent(g, searcher=Searcher(), model=None, now=lambda: now, who="judge-demo")
+        assert agent.run("buy a card")["ok"]
 
 
 def test_without_a_model_the_rule_based_agent_runs_and_says_so(tmp_path):

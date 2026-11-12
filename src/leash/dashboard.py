@@ -303,7 +303,7 @@ def make_handler(
                 return
             elif self.path == "/api/agent/run":
                 # The "Ask the agent" box: a real model shops, Leash decides.
-                self._json(200, web_agent.WebAgent(gate).run(str(body.get("task", ""))))
+                self._json(200, web_agent.WebAgent(gate, who=who).run(str(body.get("task", ""))))
                 return
             elif self.path == "/api/agent/hijack":
                 self._json(200, web_agent.run_hijack(gate))

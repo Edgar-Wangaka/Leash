@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -45,8 +46,21 @@ MAX_TASK_CHARS = 300
 MAX_ROUNDS = 6            # model turns per run
 MAX_PAYMENTS = 2          # request_payment calls per run
 MAX_TOKENS = 1024         # per model turn
-RUNS_PER_MINUTE = 3
-RUNS_PER_DAY = 150
+# Run limits. Per person (each dashboard token holder) so one judge cannot
+# use up the box for the others, plus overall limits that protect the free
+# model quota. Each can be changed with an environment variable.
+RUNS_PER_MINUTE_EACH = 5
+RUNS_PER_MINUTE = 20
+RUNS_PER_DAY = 300
+RETRY_WAIT_SECONDS = 2.0
+
+
+def _limit(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 PAGE_CHARS = 6000
 
 SYSTEM_PROMPT = (
@@ -141,8 +155,12 @@ class WebAgent:
         read_page: Callable[[str], dict[str, Any]] = _read_page,
         model: dict[str, str] | None = None,
         now: Callable[[], datetime] | None = None,
+        who: str = "unknown",
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         self.gate = gate
+        self.who = who
+        self._sleep = sleep or time.sleep
         self.searcher = searcher or ProductSearcher()
         self.http = http_client
         self.read_page = read_page
@@ -153,9 +171,13 @@ class WebAgent:
 
     def _too_busy(self) -> str | None:
         now = self._now()
-        if self.gate.count_agent_runs(now - timedelta(minutes=1)) >= RUNS_PER_MINUTE:
-            return "The agent is busy. Try again in a minute."
-        if self.gate.count_agent_runs(now - timedelta(days=1)) >= RUNS_PER_DAY:
+        minute_ago = now - timedelta(minutes=1)
+        each = _limit("LEASH_AGENT_RUNS_PER_MINUTE_EACH", RUNS_PER_MINUTE_EACH)
+        if self.gate.count_agent_runs(minute_ago, who=self.who) >= each:
+            return f"You've used {each} runs this minute. Try again in about a minute."
+        if self.gate.count_agent_runs(minute_ago) >= _limit("LEASH_AGENT_RUNS_PER_MINUTE", RUNS_PER_MINUTE):
+            return "Lots of people are using the agent right now. Try again in about a minute."
+        if self.gate.count_agent_runs(now - timedelta(days=1)) >= _limit("LEASH_AGENT_RUNS_PER_DAY", RUNS_PER_DAY):
             return "The agent is resting: today's runs are used up. The hijack demo still works."
         return None
 
@@ -170,12 +192,12 @@ class WebAgent:
         busy = self._too_busy()
         if busy:
             return {"ok": False, "error": busy}
-        self.gate.record_agent_run(self._now())
+        self.gate.record_agent_run(self._now(), who=self.who)
         if self.model is None:
             return self._run_rule_based(task)
         return self._run_with_model(task)
 
-    def _run_rule_based(self, task: str) -> dict[str, Any]:
+    def _run_rule_based(self, task: str, note: str | None = None) -> dict[str, Any]:
         steps: list[dict[str, Any]] = []
         products = [p for p in self.searcher.search(task) if not is_planted(p)]
         steps.append({"tool": "search_products", "input": {"query": task},
@@ -190,7 +212,7 @@ class WebAgent:
         })
         steps.append({"tool": "request_payment", "input": _product_view(product), "decision": decision})
         return {"ok": True, "mode": "rule-based", "steps": steps, "decisions": [decision],
-                "answer": "No AI model is configured, so Leash's rule-based agent picked the first result."}
+                "answer": note or "No AI model is configured, so Leash's rule-based agent picked the first result."}
 
     def _run_with_model(self, task: str) -> dict[str, Any]:
         messages: list[dict[str, Any]] = [
@@ -205,12 +227,20 @@ class WebAgent:
         try:
             for _ in range(MAX_ROUNDS):
                 try:
-                    message = self._turn(client, messages)
-                except (httpx.HTTPError, KeyError, ValueError, TypeError) as error:
+                    message = self._turn_with_retry(client, messages)
+                except (httpx.HTTPError, KeyError, ValueError, TypeError, IndexError) as error:
                     logger.warning("Agent model call failed: %s", error.__class__.__name__)
-                    return {"ok": False, "mode": self.model["provider"], "model": self.model["model"],
-                            "steps": steps, "decisions": decisions,
-                            "error": "The AI model did not answer. Try again in a moment."}
+                    if decisions:
+                        # Leash already decided a payment; never run it again.
+                        return {"ok": True, "mode": self.model["provider"], "model": self.model["model"],
+                                "steps": steps, "decisions": decisions,
+                                "answer": "The AI model stopped answering. Leash's decision is above."}
+                    fallback = self._run_rule_based(
+                        task, note="The AI model is busy, so Leash's rule-based agent made this run. "
+                                   "It picked the first matching product.")
+                    fallback["steps"] = steps + fallback["steps"]
+                    fallback["model_unavailable"] = True
+                    return fallback
                 calls = message.get("tool_calls") or []
                 if message.get("content"):
                     answer = str(message["content"])
@@ -229,6 +259,18 @@ class WebAgent:
                 "steps": steps, "decisions": decisions,
                 "answer": answer or ("Leash has decided; see the steps." if decisions else
                                      "The agent stopped without buying anything.")}
+
+    def _turn_with_retry(self, client: httpx.Client, messages: list[dict[str, Any]]) -> dict[str, Any]:
+        """One model turn; one more try after a short wait if the model is busy."""
+        try:
+            return self._turn(client, messages)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 429 and error.response.status_code < 500:
+                raise
+        except httpx.TransportError:
+            pass
+        self._sleep(RETRY_WAIT_SECONDS)
+        return self._turn(client, messages)
 
     def _turn(self, client: httpx.Client, messages: list[dict[str, Any]]) -> dict[str, Any]:
         headers = {"Content-Type": "application/json"}
