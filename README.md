@@ -12,11 +12,34 @@ a fixed set of rules decides what happens to the request:
 | Outcome | When |
 |---|---|
 | Paid | The amount is below the approval threshold, the seller is approved, and the daily budget covers it |
-| Held for a human | The amount is at or above the approval threshold. You approve or deny it in the dashboard |
+| Held for a human | The amount is at or above the approval threshold, Channel3 can't confirm the price, or the price is more than 25% above the product's 30-day median. You approve or deny it in the dashboard |
 | Blocked | The amount is over the per-payment cap or the daily budget, the seller is unknown, requests are arriving too fast, the task was never approved, the amount is not a valid positive number, the amount is higher than the product's live price in the catalog, or the payment is addressed to a different seller than the catalog lists for that product |
 
 The rules are ordinary code with no model in them, so nothing an agent reads
 or writes can change the outcome.
+
+## Try it (for judges)
+
+Open https://www.agentleash.me and paste the access token from our
+submission into the sign-in box. Everything runs on PayPal's sandbox with test
+money, and the products are real listings from Channel3.
+
+1. Under "Ask the agent to buy something", click **Small gift**. A Gemini
+   model searches Channel3 and asks Leash to pay. A card under $15 is paid at
+   once, and the row shows PayPal's batch and transaction IDs.
+2. Click **$60 hamper**. Leash holds it because it is over the $40 approval
+   threshold. Approve or deny it under "Waiting for your approval".
+3. Click **Try to trick it**, or type your own attempt. Whatever the model
+   asks for, a payment to an unknown seller or over the cap is blocked.
+4. Click **Hijacked agent (no AI)**. A naive agent reads a product page with a
+   hidden instruction, tries to pay $500 to `attacker@example.com`, and Leash
+   blocks it. The page shows the hidden text it obeyed.
+5. Open **Change limits**, lower the daily budget, and watch the bar change.
+   Raising a limit asks you to confirm first. **Back to defaults** puts
+   everything back.
+
+The agent box allows 3 runs a minute. If the first page load takes a while,
+the free server was asleep; it stays awake after that.
 
 ## How it fits together
 
