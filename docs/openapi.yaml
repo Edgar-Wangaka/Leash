@@ -263,6 +263,36 @@ paths:
         "401": { $ref: "#/components/responses/TokenRequired" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /mcp:
+    post:
+      tags: [testing]
+      operationId: mcpEndpoint
+      summary: The agent's MCP endpoint (streamable HTTP)
+      description: |
+        Where an AI agent connects with the Model Context Protocol. It offers
+        three tools (search_products, request_payment, get_payment_status) and
+        nothing that approves a payment or changes a limit. Needs the agent's
+        own bearer token (LEASH_MCP_TOKEN); the dashboard token is refused here,
+        and this token is refused by the dashboard.
+      security:
+        - mcpToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, description: An MCP JSON-RPC message. }
+      responses:
+        "200":
+          description: The MCP response.
+          content:
+            application/json:
+              schema: { type: object }
+        "401":
+          description: Missing or wrong bearer token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /webhooks/channel3:
     post:
       tags: [settings]
@@ -329,6 +359,10 @@ paths:
 
 components:
   securitySchemes:
+    mcpToken:
+      type: http
+      scheme: bearer
+      description: The agent's token (LEASH_MCP_TOKEN), for /mcp only.
     dashboardToken:
       type: apiKey
       in: header
