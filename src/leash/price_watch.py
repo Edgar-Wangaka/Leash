@@ -89,6 +89,47 @@ class Channel3Watcher:
             return False
 
 
+    def active(self) -> list[dict[str, Any]]:
+        """This account's active subscriptions, all pages. Never raises."""
+        found: list[dict[str, Any]] = []
+        cursor: str | None = None
+        try:
+            for _ in range(20):  # at most 20 pages; this is a cleanup, not an export
+                params: dict[str, Any] = {"status": "active", "limit": 100}
+                if cursor:
+                    params["cursor"] = cursor
+                response = self._request("GET", SUBSCRIPTIONS_URL, params=params)
+                response.raise_for_status()
+                body = response.json()
+                found.extend(item for item in body.get("items") or [] if isinstance(item, dict))
+                cursor = body.get("next_cursor")
+                if not cursor:
+                    break
+        except (httpx.HTTPError, ValueError, AttributeError) as error:
+            logger.warning("Channel3 subscription list failed: %s", error.__class__.__name__)
+        return found
+
+
+def prune_watches(watcher: Channel3Watcher, has_pending_hold_for: Callable[[str], bool]) -> list[str]:
+    """Cancel Leash's subscriptions whose product no request waits on any more.
+
+    Only subscriptions Leash would have made (exactly its two event types)
+    are touched; anything else on the Channel3 account is left alone.
+    Returns the IDs cancelled.
+    """
+    cancelled = []
+    for subscription in watcher.active():
+        if sorted(subscription.get("events") or []) != sorted(WATCHED_EVENTS):
+            continue
+        product_id = subscription.get("product_id")
+        subscription_id = subscription.get("subscription_id")
+        if not product_id or not subscription_id or has_pending_hold_for(product_id):
+            continue
+        if watcher.unwatch(subscription_id):
+            cancelled.append(subscription_id)
+    return cancelled
+
+
 def watch_sink(watcher: Channel3Watcher) -> Callable[[str, dict[str, Any]], None]:
     """An event sink that watches the product of every held request."""
 

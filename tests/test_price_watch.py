@@ -326,3 +326,35 @@ def test_an_event_for_a_waiting_request_keeps_the_watch(server):
     assert post_event(base, price_event("e10")).status_code == 200
     time.sleep(0.1)
     assert watcher.unwatched == []
+
+
+# --- cleanup of watches nobody waits on ------------------------------------------
+
+def test_prune_cancels_only_leashs_watches_with_nobody_waiting():
+    pages = [
+        {"items": [
+            {"subscription_id": "01KEEP", "product_id": "waiting", "events": list(reversed(price_watch.WATCHED_EVENTS))},
+            {"subscription_id": "01DROP", "product_id": "done", "events": price_watch.WATCHED_EVENTS},
+            {"subscription_id": "01OTHER", "product_id": "done", "events": ["offer.created"]},
+        ], "next_cursor": "c2"},
+        {"items": [{"subscription_id": "01DROP2", "product_id": "done2", "events": price_watch.WATCHED_EVENTS}],
+         "next_cursor": None},
+    ]
+    deleted, cursors = [], []
+
+    def handler(request):
+        if request.method == "GET":
+            cursors.append(request.url.params.get("cursor"))
+            return httpx.Response(200, json=pages.pop(0))
+        deleted.append(request.url.path.rsplit("/", 1)[-1])
+        return httpx.Response(200, json={"status": "cancelled"})
+
+    watcher = Channel3Watcher("k", http_client=channel3(handler))
+    cancelled = price_watch.prune_watches(watcher, lambda product_id: product_id == "waiting")
+    assert cancelled == ["01DROP", "01DROP2"] and deleted == cancelled
+    assert cursors == [None, "c2"]
+
+
+def test_prune_survives_a_channel3_outage():
+    watcher = Channel3Watcher("k", http_client=channel3(lambda r: httpx.Response(503)))
+    assert price_watch.prune_watches(watcher, lambda p: False) == []

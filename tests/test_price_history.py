@@ -172,3 +172,16 @@ def test_the_gate_holds_a_spiked_price_and_says_why(tmp_path):
     assert result["status"] == "pending"
     assert payout.calls == []
     assert "more than 25% above this product's usual price ($6.00" in result["explanation"]
+
+
+def test_lookup_keeps_the_shops_buy_link_only_when_it_is_http():
+    def product(url):
+        def handler(http_request):
+            if http_request.url.path.startswith("/v0/"):
+                return httpx.Response(200, json={"history": []})
+            return httpx.Response(200, json={"id": "p", "title": "Bear", "offers": [
+                {"domain": "lego.com", "price": {"price": 9.0}, "availability": "InStock", "url": url}]})
+        return lookup_product("prod_1", api_key="k", allowlist=SELLERS, http_client=channel3(handler))
+
+    assert product("https://buy.trychannel3.com/x?aid=1")["url"] == "https://buy.trychannel3.com/x?aid=1"
+    assert "url" not in product("javascript:alert(1)")

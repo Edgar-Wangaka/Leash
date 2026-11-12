@@ -332,13 +332,36 @@ def _stop_watching(gate: PaymentGate, product_id: str, subscription_id: str) -> 
         logger.warning("Price watch cleanup failed: %s", error.__class__.__name__)
 
 
+PRUNE_EVERY = 450  # reconcile ticks of 4 s: about every 30 minutes
+
+
 def _reconcile_forever(gate: PaymentGate, stop: threading.Event) -> None:
-    """Ask PayPal about payouts that were accepted but not yet final."""
+    """Ask PayPal about payouts that were accepted but not yet final.
+
+    About every 30 minutes, also cancel Channel3 price watches whose product
+    no request waits on any more.
+    """
+    ticks = 0
     while not stop.wait(4):
         try:
             gate.poll_submitted()
         except Exception as error:  # never let the poller take the server down
             logger.warning("Reconcile failed: %s", error.__class__.__name__)
+        ticks += 1
+        if ticks % PRUNE_EVERY == 0:
+            _prune_watches(gate)
+
+
+def _prune_watches(gate: PaymentGate) -> None:
+    watcher = price_watch.watcher_from_env()
+    if watcher is None:
+        return
+    try:
+        cancelled = price_watch.prune_watches(watcher, gate.has_pending_hold_for)
+        if cancelled:
+            logger.info("Cancelled %d Channel3 price watch(es) nobody waits on", len(cancelled))
+    except Exception as error:  # a cleanup must never take the server down
+        logger.warning("Price watch cleanup failed: %s", error.__class__.__name__)
 
 
 def dashboard_token() -> tuple[str, bool]:

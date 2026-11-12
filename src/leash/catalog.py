@@ -131,6 +131,10 @@ def lookup_product(
     }
     if selection:
         result["selection"] = selection
+    if product.get("url"):
+        # The shop's offer page (a Channel3 affiliate link). Shown next to the
+        # payment as "Buy on <shop>"; short-lived, so never reused later.
+        result["url"] = product["url"]
     if with_history:
         result["history"] = price_history(
             product_id, api_key=api_key, http_client=http_client
