@@ -104,18 +104,44 @@ integration.
 >
 > AI agents are starting to buy things for businesses, and one hidden
 > sentence on a product page can redirect their money. Leash sits between the
-> agent and PayPal. The agent can only ask to pay. Fixed rules (spending caps,
-> a daily budget, approved sellers, live price checks against Channel3, and a
-> price-spike check against 30-day history) decide whether each payment is
-> paid, held for the owner, or blocked. Approved payments go out through
-> PayPal Payouts with full status tracking and no double payments.
+> agent and PayPal. The agent never holds payment credentials; it can only ask
+> Leash to pay. Plain code with no model in it decides whether each payment
+> is paid, held for the owner, or blocked. It checks:
 >
-> Try it at https://www.agentleash.me with the access token below. Ask the
-> agent to buy a gift and it gets paid; ask for a $60 hamper and it waits for
-> you; click "Hijacked agent" and watch a hidden instruction try to send $500
-> to an attacker, and fail.
+> - spending caps and a daily budget;
+> - approved sellers;
+> - the live price on Channel3;
+> - a price-spike check against 30-day history.
 >
-> Built with PayPal Payouts (sandbox), Channel3, Render, AG Grid, Postman,
-> the APIMatic PayPal Context Plugin, Neon, KERNEL and Gemini.
+> Approved payments go out through PayPal Payouts. Leash tracks each one to
+> PayPal's final status and never pays the same request twice.
+>
+> In the video:
+>
+> - A Gemini agent buys a $5 card, and it is paid.
+> - It finds a gift basket over the $40 threshold, which waits for my
+>   approval.
+> - An agent with no AI reads a booby-trapped listing and tries to send $500
+>   to an attacker. Leash blocks it.
+> - The agent asks for a $300 mixer, over the $100 cap. Leash blocks it.
+>
+> Every decision is logged with its reason and can be exported.
+>
+> Honest limits: all money is PayPal sandbox test money. Real shops have no
+> PayPal sandbox accounts, so each shop is paid through a sandbox account
+> standing in for it, and the dashboard says so on every row. The hijacked
+> listing is a page we planted for the demo. The products and prices are real
+> Channel3 listings.
+>
+> Try it at https://www.agentleash.me with the access token below. The free
+> server may take up to a minute to wake on the first load.
+>
+> Built with PayPal Payouts (sandbox), Channel3, Render, Neon, AG Grid,
+> Postman, the APIMatic PayPal Context Plugin, KERNEL and Gemini.
 >
 > Judge access token: `<paste LEASH_DEMO_TOKEN here>`
+
+If the final video includes the "partial payment" closer, change the last
+video bullet to: "The agent asks for a $300 mixer, over the $100 cap. Leash
+blocks it. The agent then tries a $99.99 'partial payment' just under the cap,
+and Leash holds it, showing the real $299.99 price."
