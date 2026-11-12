@@ -1,0 +1,26 @@
+# Render's free plan sleeps after 15 minutes without traffic, and the first
+# visitor then waits about 50 seconds. This pings the health check every
+# 10 minutes so judges find Leash awake. /healthz reveals nothing but "ok".
+#
+# GitHub runs scheduled workflows only from the default branch (main), and
+# stops them after 60 days without commits; "Run workflow" starts it by hand.
+name: keep-awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping the health check
+        run: |
+          for url in https://www.agentleash.me/healthz https://leash-1pqh.onrender.com/healthz; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$url" || true)
+            echo "$url -> $code"
+          done

@@ -1,0 +1,17 @@
+{
+  "name": "Leash",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -e '.[test]' && cp -n .env.example .env || true",
+  "containerEnv": {
+    "DRY_RUN": "true"
+  },
+  "forwardPorts": [8787],
+  "portsAttributes": {
+    "8787": { "label": "Leash dashboard" }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}

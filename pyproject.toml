@@ -14,6 +14,20 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "pytest",
+    "pyyaml>=6",
+]
+# Each integration is optional and does nothing until its env var is set.
+remote = [
+    "uvicorn>=0.30",
+    "starlette>=0.37",
+]
+kernel = [
+    "kernel",
+    "playwright>=1.44",
+]
+# Keeps dashboard limit changes in a hosted Postgres (e.g. Neon's free tier).
+postgres = [
+    "psycopg[binary]>=3.1",
 ]
 
 [tool.pytest.ini_options]

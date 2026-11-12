@@ -47,6 +47,11 @@ def state(**overrides):
         ("velocity", state(), state()),
         ("duplicate_request_id", state(), state(seen_request_ids={"request-1"})),
         ("unrequested_task", state(), state(approved_task_ids=set())),
+        (
+            "payee_mismatch",
+            state(catalog={"status": "ok", "price_usd": "8", "merchant_email": "allowed@example.com"}),
+            state(catalog={"status": "ok", "price_usd": "8", "merchant_email": "other@example.com"}),
+        ),
     ],
 )
 def test_each_rule_has_pass_and_fail(rule, passing, failing):

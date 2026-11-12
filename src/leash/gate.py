@@ -4,29 +4,55 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
+
+from contextlib import contextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from payouts.paypal_client import PayPalClient
 
-from .explainer import explain, llm_risk_signal
+from . import events
+from .db import Database, PostgresDatabase, SqliteDatabase
+from .explainer import current_explanation, explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
+from .settings import LiveSettings, SettingsStore, store_from_env
 
 logger = logging.getLogger(__name__)
 
-RESERVED_STATUSES = {"pending", "paying", "submitted", "needs_reconcile", "paid"}
-FINAL_PAY_STATUSES = {"paid", "failed", "unclaimed"}
-IN_PROGRESS_STATUSES = {"PENDING", "PROCESSING", "NEW"}
+# Every batch_status and transaction_status in PayPal's Payouts v1 schema
+# (batch_enum, transaction_enum). ONHOLD means PayPal is still reviewing it.
+IN_PROGRESS_STATUSES = {"PENDING", "PROCESSING", "NEW", "ONHOLD"}
 PAYPAL_STATUS_MAP = {
     "SUCCESS": "paid",
     "DENIED": "failed",
     "FAILED": "failed",
     "UNCLAIMED": "unclaimed",
+    # The money did not reach the seller, or came back: none of it is spend.
+    "CANCELED": "failed",
+    "BLOCKED": "failed",
+    "RETURNED": "failed",
+    "REFUNDED": "failed",
+    "REVERSED": "failed",
 }
+
+# Re-sending a payout PayPal never answered (see _resend_unanswered). PayPal
+# keeps sender_batch_id and PayPal-Request-Id for 30 days; stay far inside that.
+PRICE_EVENT_KINDS = {"offer.price.changed", "offer.availability.changed"}
+MAX_RESENDS = 5
+RESEND_WINDOW = timedelta(days=7)
+
+
+def _payout_note(request_id: str) -> str:
+    # A resend must carry the same body as the first send.
+    return f"Leash payment {request_id[:8]}"
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 class PaymentGate:
@@ -40,18 +66,65 @@ class PaymentGate:
         payout_client: Any | None = None,
         now: Callable[[], datetime] | None = None,
         risk_signal: Callable[[PaymentRequest, str], tuple[str, str]] | None = None,
+        price_lookup: Callable[[str], dict[str, Any]] | None = None,
+        on_event: Callable[[str, dict[str, Any]], None] | None = None,
+        settings_store: SettingsStore | None = None,
+        database: Database | None = None,
     ) -> None:
         self.db_path = db_path
-        self.policy = load_policy(policy_path)
-        self.payout_client = payout_client or PayPalClient()
+        # The payment log: db_path (SQLite), or the hosted Postgres the
+        # dashboard and MCP server pass in (see leash.db).
+        self._db = database or SqliteDatabase(db_path)
+        # Told about each committed decision change. It sees a copy of the
+        # record after the fact and cannot change the outcome.
+        self._on_event = on_event if on_event is not None else events.emit
+        # policy.json gives the defaults; the human can change the editable
+        # limits from the dashboard, and every decision reads the latest.
+        self.settings = LiveSettings(
+            load_policy(policy_path), settings_store or store_from_env(db_path)
+        )
+        # The payout client's idempotency records live next to the decisions,
+        # so a hosted restart never forgets that a payout was sent.
+        self.payout_client = payout_client or PayPalClient(
+            database=self._db if isinstance(self._db, PostgresDatabase) else None
+        )
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._risk_signal = risk_signal or llm_risk_signal
+        # Looks a product up in the catalog. None means no catalog is configured.
+        self._price_lookup = price_lookup
         self._initialize_database()
+
+    @property
+    def policy(self) -> dict[str, Any]:
+        """The limits in force now: policy.json plus the human's latest change."""
+        return self.settings.policy()
+
+    def change_settings(
+        self,
+        changes: dict[str, Any],
+        *,
+        changed_by: str,
+        confirm_loosening: bool = False,
+        reset: bool = False,
+    ) -> dict[str, Any]:
+        """Change the editable limits. Only the dashboard calls this."""
+        return self.settings.change(
+            changes, changed_by=changed_by, confirm_loosening=confirm_loosening, reset=reset
+        )
+
+    @contextmanager
+    def _connect(self, timeout: float = 5.0) -> Iterator[Any]:
+        """A connection that commits (or rolls back) and then closes or returns."""
+        with self._db.connect(timeout=timeout) as connection:
+            yield connection
 
     def close(self) -> None:
         close = getattr(self.payout_client, "close", None)
         if close:
             close()
+        close_store = getattr(self.settings.store, "close", None)
+        if close_store:
+            close_store()
 
     def __enter__(self) -> "PaymentGate":
         return self
@@ -61,7 +134,8 @@ class PaymentGate:
 
     def process(self, request: PaymentRequest, *, task_text: str = "") -> dict[str, Any]:
         """Evaluate, reserve, and pay an allow decision."""
-        decision, existing = self._reserve_decision(request)
+        catalog = self._check_catalog(request)
+        decision, existing = self._reserve_decision(request, catalog)
         if existing is not None:
             return existing
 
@@ -76,10 +150,22 @@ class PaymentGate:
             self._update_policy(request.request_id, decision, signal, signal_reason)
 
         record = self._get_decision(request.request_id) or {}
+        if record:
+            self._notify(events.initial_kind(record), record)
         if decision.verdict == "allow":
             result = self._pay(record, request)
             return result["record"]
         return record
+
+    def _check_catalog(self, request: PaymentRequest) -> dict[str, Any] | None:
+        """Ask the catalog what the named product costs. Never raises."""
+        if not self._price_lookup or not request.product_id:
+            return None
+        try:
+            return self._price_lookup(request.product_id)
+        except Exception as error:
+            logger.warning("Catalog lookup failed: %s", error.__class__.__name__)
+            return {"status": "unavailable", "error": error.__class__.__name__}
 
     @staticmethod
     def _merge_risk_signal(
@@ -120,8 +206,8 @@ class PaymentGate:
             self._set_status(request_id, "expired")
             return self._result(False, "expired", "approval_expired", request_id)
 
-        with sqlite3.connect(self.db_path, timeout=30) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._connect(timeout=30) as connection:
+            self._db.begin_exclusive(connection, "decisions")
             claimed = connection.execute(
                 """
                 UPDATE decisions
@@ -133,6 +219,8 @@ class PaymentGate:
                 (approved_by, now.isoformat(), request_id, now.isoformat()),
             ).rowcount
             connection.commit()
+        if claimed == 1:
+            self._notify("decision.approved", request_id)
 
         if claimed != 1:
             latest = self._get_decision(request_id)
@@ -169,8 +257,8 @@ class PaymentGate:
         if denied_by == record["agent_id"]:
             return self._result(False, "rejected", "denier_is_requesting_agent", request_id)
 
-        with sqlite3.connect(self.db_path, timeout=30) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._connect(timeout=30) as connection:
+            self._db.begin_exclusive(connection, "decisions")
             claimed = connection.execute(
                 """
                 UPDATE decisions
@@ -196,6 +284,8 @@ class PaymentGate:
                 request_id,
                 latest,
             )
+        if latest:
+            self._notify("decision.denied", latest)
         return self._result(True, "denied", None, request_id, latest)
 
     def reconcile(self, request_id: str) -> dict[str, Any]:
@@ -207,15 +297,73 @@ class PaymentGate:
             return self._result(False, record["status"], "not_reconcilable", request_id, record)
 
         batch_id = self._batch_id_for_request(request_id, record)
+        if not batch_id and record["status"] == "needs_reconcile":
+            return self._resend_unanswered(record)
         if not batch_id:
             self._set_status(request_id, "needs_reconcile")
             return self._result(False, "needs_reconcile", "batch_id_unknown", request_id)
         status = self.payout_client.get_payout_status(batch_id)
         return self._update_from_reconcile(request_id, status)
 
+    def _resend_unanswered(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Learn what happened to a send PayPal never answered, by sending it again.
+
+        PayPal has no search by sender_batch_id. Sending again with the same
+        sender_batch_id and PayPal-Request-Id (the request ID) is PayPal's
+        documented recovery: a payout that exists comes back as itself and is
+        never paid twice. PayPal only remembers those IDs for 30 days, so this
+        stops well before that. If the first send never arrived, this one pays,
+        so the hard rules are checked again first, as for an approval.
+        """
+        request_id = record["request_id"]
+        resend = getattr(self.payout_client, "resend_payout", None)
+        payout = record.get("payout") or {}
+        attempts = int(payout.get("resend_attempts") or 0)
+        reason = None
+        if resend is None:
+            reason = "batch_id_unknown"
+        elif attempts >= MAX_RESENDS:
+            reason = "resend_limit_reached"
+        elif self._now().astimezone(timezone.utc) - _parse_time(record["created_at"]) > RESEND_WINDOW:
+            reason = "too_old_to_resend"
+        else:
+            hard_reasons = self._hard_recheck(record)
+            if hard_reasons:
+                # Not rejected: the first send may have paid. A human looks.
+                reason = "resend_blocked:" + ",".join(hard_reasons)
+        if reason:
+            return self._result(False, "needs_reconcile", reason, request_id, record)
+
+        # Count the attempt before sending, so a crash mid-send still counts.
+        payout = {**payout, "resend_attempts": attempts + 1}
+        self._set_status(request_id, "needs_reconcile", payout)
+        amount = Decimal(record["amount_cents"]) / Decimal(100)
+        try:
+            answer = resend(request_id, record["merchant_email"], amount, _payout_note(request_id))
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            return self._result(False, "needs_reconcile", "resend_failed", request_id)
+
+        payout = {**payout, **answer}
+        status = str(answer.get("status") or "needs_reconcile").lower()
+        if status == "success":
+            status = "paid"
+        if status not in {"paid", "submitted", "failed", "unclaimed"}:
+            status = "needs_reconcile"
+        self._set_status(request_id, status, payout, answer.get("error_name"))
+        return self._result(
+            status in {"paid", "submitted"}, status,
+            answer.get("error_name") if status == "failed" else None, request_id,
+        )
+
     def poll_submitted(self) -> list[dict[str, Any]]:
-        """Reconcile every submitted or uncertain row without resending."""
-        with sqlite3.connect(self.db_path) as connection:
+        """Reconcile every submitted or uncertain row.
+
+        Only a payout whose first send never answered is sent again, with
+        the same IDs; see _resend_unanswered.
+        """
+        with self._connect() as connection:
             request_ids = [
                 row[0]
                 for row in connection.execute(
@@ -233,7 +381,7 @@ class PaymentGate:
 
     def list_decisions(self, limit: int = 50) -> list[dict[str, Any]]:
         """Return the most recent decisions, newest first."""
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             request_ids = [
                 row[0]
                 for row in connection.execute(
@@ -242,8 +390,110 @@ class PaymentGate:
                     (int(limit),),
                 ).fetchall()
             ]
-        records = (self._get_decision(request_id) for request_id in request_ids)
+            records = [self._get_decision(request_id, connection) for request_id in request_ids]
         return [record for record in records if record]
+
+    def record_price_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Store one Channel3 price or stock change. Changes no decision.
+
+        Returns whether it was new and which waiting requests it concerns.
+        """
+        data = event.get("data") if isinstance(event, dict) else None
+        subject = (data or {}).get("subject") or {}
+        kind = event.get("type") if isinstance(event, dict) else None
+        product_id = subject.get("product_id")
+        event_id = event.get("id") if isinstance(event, dict) else None
+        if kind not in PRICE_EVENT_KINDS or not isinstance(product_id, str) or not event_id:
+            return {"recorded": False, "pending_request_ids": [], "ignored": True}
+        # Stored in the same UTC ISO form as created_at, so the two compare as text.
+        try:
+            event_time = _parse_time(str(event.get("timestamp")).replace("Z", "+00:00"))
+        except ValueError:
+            event_time = self._now()
+        event_time = event_time.astimezone(timezone.utc).isoformat()
+        with self._connect() as connection:
+            inserted = connection.execute(
+                "INSERT OR IGNORE INTO price_events (event_id, kind, product_id, domain, "
+                "previous_json, current_json, event_time, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(event_id), kind, product_id, subject.get("domain"),
+                    json.dumps(data.get("previous")), json.dumps(data.get("current")),
+                    event_time, self._now().astimezone(timezone.utc).isoformat(),
+                ),
+            ).rowcount
+            pending = [
+                row[0] for row in connection.execute(
+                    "SELECT request_id FROM decisions WHERE status = 'pending' "
+                    "AND json_extract(request_json, '$.product_id') = ?",
+                    (product_id,),
+                ).fetchall()
+            ]
+        return {"recorded": inserted == 1, "pending_request_ids": pending}
+
+    def price_alerts(self) -> dict[str, dict[str, Any]]:
+        """For each waiting request, the latest price and stock change since it was made.
+
+        Only changes at the seller the request was priced from count. One
+        connection, whatever the number of requests.
+        """
+        alerts: dict[str, dict[str, Any]] = {}
+        with self._connect() as connection:
+            waiting = connection.execute(
+                "SELECT request_id, created_at, "
+                "json_extract(request_json, '$.product_id'), "
+                "json_extract(request_json, '$.catalog.sold_by') "
+                "FROM decisions WHERE status = 'pending' "
+                "AND json_extract(request_json, '$.product_id') IS NOT NULL"
+            ).fetchall()
+            for request_id, created_at, product_id, sold_by in waiting:
+                rows = connection.execute(
+                    "SELECT kind, domain, previous_json, current_json, event_time "
+                    "FROM price_events WHERE product_id = ? AND event_time >= ? "
+                    "AND (CAST(? AS TEXT) IS NULL OR domain IS NULL OR domain = ?) "
+                    "ORDER BY event_time",
+                    (product_id, created_at, sold_by, sold_by),
+                ).fetchall()
+                latest: dict[str, Any] = {}
+                for kind, domain, previous, current, event_time in rows:
+                    key = "price" if kind == "offer.price.changed" else "availability"
+                    first = latest.get(key)
+                    latest[key] = {
+                        "domain": domain,
+                        # What it was when first changed after the request, and now.
+                        "previous": first["previous"] if first else json.loads(previous or "null"),
+                        "current": json.loads(current or "null"),
+                        "changed_at": event_time,
+                        "changes": (first["changes"] + 1) if first else 1,
+                    }
+                if latest:
+                    alerts[request_id] = latest
+        return alerts
+
+    def record_agent_run(self, at: datetime, who: str = "unknown") -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO agent_runs (started_at, who) VALUES (?, ?)",
+                (at.astimezone(timezone.utc).isoformat(), who),
+            )
+
+    def count_agent_runs(self, since: datetime, who: str | None = None) -> int:
+        """Runs since ``since``: everyone's, or one token holder's."""
+        query = "SELECT COUNT(*) FROM agent_runs WHERE started_at >= ?"
+        params: tuple = (since.astimezone(timezone.utc).isoformat(),)
+        if who is not None:
+            query += " AND who = ?"
+            params += (who,)
+        with self._connect() as connection:
+            return int(connection.execute(query, params).fetchone()[0])
+
+    def has_pending_hold_for(self, product_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM decisions WHERE status = 'pending' "
+                "AND json_extract(request_json, '$.product_id') = ? LIMIT 1",
+                (product_id,),
+            ).fetchone()
+        return row is not None
 
     def daily_spend_usd(self) -> Decimal:
         """Money committed in the last 24 hours, as the budget rule counts it."""
@@ -278,8 +528,8 @@ class PaymentGate:
             return self._result(False, "rejected", "verdict_not_payable", request_id, current)
 
         if not already_claimed:
-            with sqlite3.connect(self.db_path, timeout=30) as connection:
-                connection.execute("BEGIN IMMEDIATE")
+            with self._connect(timeout=30) as connection:
+                self._db.begin_exclusive(connection, "decisions")
                 claimed = connection.execute(
                     "UPDATE decisions SET status = 'paying' "
                     "WHERE request_id = ? AND status = 'pending'",
@@ -298,7 +548,7 @@ class PaymentGate:
 
         receiver = current["merchant_email"]
         amount = Decimal(current["amount_cents"]) / Decimal(100)
-        note = f"Leash payment {request_id[:8]}"
+        note = _payout_note(request_id)
         try:
             payout = self.payout_client.send_payout(
                 request_id, receiver, amount, note
@@ -347,10 +597,10 @@ class PaymentGate:
         return self._result(mapped == "paid", mapped, error_name, request_id)
 
     def _reserve_decision(
-        self, request: PaymentRequest
+        self, request: PaymentRequest, catalog: dict[str, Any] | None = None
     ) -> tuple[Decision | None, dict[str, Any] | None]:
-        with sqlite3.connect(self.db_path, timeout=30) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self._connect(timeout=30) as connection:
+            self._db.begin_exclusive(connection, "decisions")
             existing = connection.execute(
                 "SELECT request_id FROM decisions WHERE request_id = ?",
                 (request.request_id,),
@@ -358,66 +608,68 @@ class PaymentGate:
             if existing:
                 connection.rollback()
                 return None, self._get_decision(request.request_id)
-            decision = evaluate(request, self._state(connection))
+            state = self._state(connection)
+            state["catalog"] = catalog
+            state["catalog_configured"] = self._price_lookup is not None
+            decision = evaluate(request, state)
             status = "blocked" if decision.verdict == "block" else "pending"
-            self._insert_decision(connection, request, decision, status)
+            self._insert_decision(connection, request, decision, status, catalog)
             connection.commit()
             return decision, None
 
     def _state(
         self,
-        connection: sqlite3.Connection | None = None,
+        connection: Any | None = None,
         *,
         exclude_request_id: str | None = None,
     ) -> dict[str, Any]:
-        owns = connection is None
-        connection = connection or sqlite3.connect(self.db_path)
+        if connection is None:
+            with self._connect() as owned:
+                return self._state(owned, exclude_request_id=exclude_request_id)
         # created_at is stored as a UTC ISO-8601 string, so the window cutoffs
         # must be in the same format for the string comparison to be correct.
         now = self._now().astimezone(timezone.utc)
         day_ago = (now - timedelta(days=1)).isoformat()
         minute_ago = (now - timedelta(minutes=1)).isoformat()
-        try:
-            # Money counts against the budget once it is committed: an allowed
-            # request from the moment it is reserved, a human hold from the
-            # moment an approval claims it.
-            rows = connection.execute(
-                """
-                SELECT request_id, amount_cents, status
-                FROM decisions
-                WHERE created_at >= ?
-                  AND request_id IS NOT ?
-                  AND (
-                    (verdict = 'allow' AND status IN (
-                        'pending', 'paying', 'submitted', 'needs_reconcile', 'paid'))
-                    OR (verdict = 'hold_for_human' AND status IN (
-                        'paying', 'submitted', 'needs_reconcile', 'paid'))
-                  )
-                """,
-                (day_ago, exclude_request_id),
-            ).fetchall()
-            recent = connection.execute(
-                "SELECT COUNT(*) FROM decisions WHERE created_at >= ?",
-                (minute_ago,),
-            ).fetchone()[0]
-            return {
-                "policy": self.policy,
-                "daily_spend_usd": sum(
-                    (Decimal(cents) / Decimal(100) for _, cents, _ in rows), Decimal("0")
-                ),
-                "recent_request_count": recent,
-                "seen_request_ids": {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT request_id FROM decisions WHERE created_at >= ?",
-                        (day_ago,),
-                    ).fetchall()
-                },
-                "approved_task_ids": set(self.policy.get("approved_task_ids", [])),
-            }
-        finally:
-            if owns:
-                connection.close()
+        # Money counts against the budget from the moment it is committed:
+        # an allowed request when it is reserved (created_at), a human hold
+        # when an approval claims it (approved_at). Windowing a hold on its
+        # creation time would let one approved late drop out of the budget
+        # early. Unclaimed payouts have left the account, so they count too.
+        rows = connection.execute(
+            """
+            SELECT request_id, amount_cents, status
+            FROM decisions
+            WHERE request_id IS NOT ?
+              AND (
+                (verdict = 'allow' AND created_at >= ? AND status IN (
+                    'pending', 'paying', 'submitted', 'needs_reconcile',
+                    'paid', 'unclaimed'))
+                OR (verdict = 'hold_for_human' AND approved_at >= ? AND status IN (
+                    'paying', 'submitted', 'needs_reconcile', 'paid', 'unclaimed'))
+              )
+            """,
+            (exclude_request_id, day_ago, day_ago),
+        ).fetchall()
+        recent = connection.execute(
+            "SELECT COUNT(*) FROM decisions WHERE created_at >= ?",
+            (minute_ago,),
+        ).fetchone()[0]
+        return {
+            "policy": self.policy,
+            "daily_spend_usd": sum(
+                (Decimal(cents) / Decimal(100) for _, cents, _ in rows), Decimal("0")
+            ),
+            "recent_request_count": recent,
+            "seen_request_ids": {
+                row[0]
+                for row in connection.execute(
+                    "SELECT request_id FROM decisions WHERE created_at >= ?",
+                    (day_ago,),
+                ).fetchall()
+            },
+            "approved_task_ids": set(self.policy.get("approved_task_ids", [])),
+        }
 
     def _hard_recheck(self, record: dict[str, Any] | None) -> list[str]:
         if not record:
@@ -436,7 +688,10 @@ class PaymentGate:
         return reasons
 
     def _initialize_database(self) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        if isinstance(self._db, PostgresDatabase):
+            self._initialize_postgres()
+            return
+        with self._connect() as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS decisions (
@@ -484,13 +739,105 @@ class PaymentGate:
             )
             if "amount_cents" not in columns:
                 connection.execute("UPDATE decisions SET amount_cents = CAST(ROUND(CAST(amount_usd AS REAL) * 100) AS INTEGER)")
+            # Channel3 price and stock changes (see price_watch). event_id is
+            # Channel3's, so a redelivered webhook is stored once.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_events (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    domain TEXT,
+                    previous_json TEXT,
+                    current_json TEXT,
+                    event_time TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_price_events_product "
+                "ON price_events(product_id, event_time)"
+            )
+            # One row per "Ask the agent" run, for the per-minute and daily caps.
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS agent_runs "
+                "(started_at TEXT NOT NULL, who TEXT NOT NULL DEFAULT 'unknown')"
+            )
+            run_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(agent_runs)").fetchall()
+            }
+            if "who" not in run_columns:
+                connection.execute(
+                    "ALTER TABLE agent_runs ADD COLUMN who TEXT NOT NULL DEFAULT 'unknown'"
+                )
+
+    def _initialize_postgres(self) -> None:
+        """The same tables in Postgres. seq stands in for SQLite's rowid."""
+        with self._connect() as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS decisions (
+                    seq BIGSERIAL,
+                    request_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    merchant_email TEXT NOT NULL,
+                    amount_cents BIGINT,
+                    amount_usd TEXT,
+                    verdict TEXT NOT NULL,
+                    reasons_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    policy_snapshot_json TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    payout_json TEXT,
+                    error_name TEXT,
+                    risk_signal TEXT NOT NULL DEFAULT 'none',
+                    risk_reason TEXT NOT NULL DEFAULT '',
+                    explanation TEXT NOT NULL DEFAULT '',
+                    approved_by TEXT,
+                    approved_at TEXT,
+                    expires_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_decisions_created ON decisions(created_at, seq)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS price_events (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    domain TEXT,
+                    previous_json TEXT,
+                    current_json TEXT,
+                    event_time TEXT NOT NULL,
+                    received_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_price_events_product "
+                "ON price_events(product_id, event_time)"
+            )
+            # One row per "Ask the agent" run, for the per-minute and daily caps.
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS agent_runs "
+                "(started_at TEXT NOT NULL, who TEXT NOT NULL DEFAULT 'unknown')"
+            )
+            connection.execute(
+                "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS who TEXT NOT NULL DEFAULT 'unknown'"
+            )
 
     def _insert_decision(
         self,
-        connection: sqlite3.Connection,
+        connection: Any,
         request: PaymentRequest,
         decision: Decision,
         status: str,
+        catalog: dict[str, Any] | None = None,
     ) -> None:
         # An unpayable amount is stored as 0 cents; its request is always blocked.
         amount_cents = amount_to_cents(request.amount_usd) or 0
@@ -498,7 +845,10 @@ class PaymentGate:
         if decision.verdict == "hold_for_human":
             hours = float(self.policy.get("human_approval_expiry_hours", 24))
             expires_at = (self._now().astimezone(timezone.utc) + timedelta(hours=hours)).isoformat()
-        request_json = json.dumps({**asdict(request), "amount_usd": str(request.amount_usd)}, sort_keys=True)
+        request_json = json.dumps(
+            {**asdict(request), "amount_usd": str(request.amount_usd), "catalog": catalog},
+            sort_keys=True,
+        )
         connection.execute(
             """
             INSERT INTO decisions (
@@ -524,24 +874,29 @@ class PaymentGate:
                     "reasons": decision.reasons,
                     "amount_usd": str(request.amount_usd),
                     "policy_snapshot": self.policy,
+                    "catalog": catalog,
                 }),
                 expires_at,
                 self._now().astimezone(timezone.utc).isoformat(),
             ),
         )
 
-    def _get_decision(self, request_id: str) -> dict[str, Any] | None:
-        with sqlite3.connect(self.db_path) as connection:
-            row = connection.execute(
-                """
-                SELECT request_id, agent_id, merchant_email, amount_cents, amount_usd,
-                       verdict, reasons_json, status, policy_snapshot_json, request_json,
-                       payout_json, error_name, risk_signal, risk_reason, explanation,
-                       approved_by, approved_at, expires_at, created_at
-                FROM decisions WHERE request_id = ?
-                """,
-                (request_id,),
-            ).fetchone()
+    def _get_decision(
+        self, request_id: str, connection: Any | None = None
+    ) -> dict[str, Any] | None:
+        if connection is None:
+            with self._connect() as owned:
+                return self._get_decision(request_id, owned)
+        row = connection.execute(
+            """
+            SELECT request_id, agent_id, merchant_email, amount_cents, amount_usd,
+                   verdict, reasons_json, status, policy_snapshot_json, request_json,
+                   payout_json, error_name, risk_signal, risk_reason, explanation,
+                   approved_by, approved_at, expires_at, created_at
+            FROM decisions WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
         if not row:
             return None
         return {
@@ -551,7 +906,8 @@ class PaymentGate:
             "policy_snapshot": json.loads(row[8]), "request": json.loads(row[9]),
             "request_json": row[9], "payout": json.loads(row[10]) if row[10] else None,
             "error_name": row[11], "risk_signal": row[12], "risk_reason": row[13],
-            "explanation": row[14], "approved_by": row[15], "approved_at": row[16],
+            "explanation": current_explanation(row[14], row[7]),
+            "approved_by": row[15], "approved_at": row[16],
             "expires_at": row[17], "created_at": row[18],
         }
 
@@ -564,8 +920,9 @@ class PaymentGate:
             "reasons": decision.reasons,
             "amount_usd": record["amount_usd"],
             "policy_snapshot": self.policy,
+            "catalog": record["request"].get("catalog"),
         })
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE decisions SET verdict = ?, reasons_json = ?, risk_signal = ?,
@@ -583,7 +940,10 @@ class PaymentGate:
         self, request_id: str, status: str, payout: dict[str, Any] | None = None,
         error_name: str | None = None,
     ) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
+            previous = connection.execute(
+                "SELECT status FROM decisions WHERE request_id = ?", (request_id,)
+            ).fetchone()
             connection.execute(
                 """
                 UPDATE decisions SET status = ?, payout_json = COALESCE(?, payout_json),
@@ -592,13 +952,32 @@ class PaymentGate:
                 """,
                 (status, json.dumps(payout) if payout is not None else None, error_name, request_id),
             )
+        # Only a real change is an event: polling a submitted payout that is
+        # still submitted must not announce it again.
+        kind = events.STATUS_EVENTS.get(status)
+        if kind and previous and previous[0] != status:
+            self._notify(kind, request_id)
 
     def _set_rejected_on_recheck(self, request_id: str, reasons: list[str]) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with self._connect() as connection:
             connection.execute(
                 "UPDATE decisions SET status = 'rejected_on_recheck', reasons_json = ? WHERE request_id = ?",
                 (json.dumps(reasons), request_id),
             )
+        self._notify("decision.rejected_on_recheck", request_id)
+
+    def _notify(self, kind: str, record_or_id: dict[str, Any] | str) -> None:
+        """Hand a committed change to the event bus. Never raises."""
+        try:
+            record = (
+                self._get_decision(record_or_id)
+                if isinstance(record_or_id, str)
+                else record_or_id
+            )
+            if record:
+                self._on_event(kind, record)
+        except Exception as error:
+            logger.warning("Event hook failed: %s", error.__class__.__name__)
 
     def _is_expired(self, record: dict[str, Any], now: datetime) -> bool:
         return bool(record.get("expires_at") and record["expires_at"] <= now.isoformat())
@@ -638,21 +1017,17 @@ class PaymentGate:
             return self._result(False, mapped, None, request_id)
         transaction_status = str(status.get("transaction_status") or "").upper()
         batch_status = str(status.get("batch_status") or "").upper()
-        paypal_status = (
-            transaction_status
-            if transaction_status in PAYPAL_STATUS_MAP
-            else batch_status
-        )
-        mapped = PAYPAL_STATUS_MAP.get(str(paypal_status).upper(), "needs_reconcile")
-        if mapped == "needs_reconcile" and (
-            transaction_status in IN_PROGRESS_STATUSES
-            or batch_status in IN_PROGRESS_STATUSES
-        ):
+        # The item's own status decides. A batch is SUCCESS once PayPal has
+        # processed it, even while the one item in it is ONHOLD or UNCLAIMED.
+        paypal_status = transaction_status or batch_status
+        mapped = PAYPAL_STATUS_MAP.get(paypal_status, "needs_reconcile")
+        if mapped == "needs_reconcile" and paypal_status in IN_PROGRESS_STATUSES:
             mapped = "submitted"  # PayPal has it and is still working on it
-        self._set_status(request_id, mapped, status, status.get("error_name"))
-        return self._result(
-            mapped in {"paid", "submitted"}, mapped, status.get("error_name"), request_id
-        )
+        error_name = status.get("error_name")
+        if mapped == "failed" and not error_name:
+            error_name = paypal_status or None  # e.g. RETURNED, so the log says why
+        self._set_status(request_id, mapped, status, error_name)
+        return self._result(mapped in {"paid", "submitted"}, mapped, error_name, request_id)
 
     def _result(
         self, ok: bool, status: str, reason: str | None, request_id: str,

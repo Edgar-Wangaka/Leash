@@ -16,7 +16,12 @@ CHANNEL3_PRODUCT = {
     "brands": [{"name": "LEGO"}],
     "offers": [
         {"domain": "pricey.example", "price": {"price": 9.5}, "availability": "InStock"},
-        {"domain": "cheap.example", "price": {"price": 4.99}, "availability": "InStock"},
+        {
+            "domain": "cheap.example",
+            "price": {"price": 4.99},
+            "availability": "InStock",
+            "url": "https://buy.trychannel3.com/abc?o=1",
+        },
         {"domain": "gone.example", "price": {"price": 1.0}, "availability": "OutOfStock"},
     ],
 }
@@ -40,6 +45,15 @@ def test_normalize_picks_cheapest_in_stock_offer():
     assert product["sold_by"] == "cheap.example"
     assert product["merchant_email"] == sandbox_seller_for("cheap.example", SELLERS)
     assert product["merchant_email"] in SELLERS
+    # The page URL is the chosen offer's, so the agent opens the right retailer.
+    assert product["url"] == "https://buy.trychannel3.com/abc?o=1"
+
+
+def test_offer_url_must_be_http():
+    for bad in ["javascript:alert(1)", "file:///etc/passwd", "", None, 42]:
+        offer = {"domain": "a.example", "price": {"price": 1.0}, "url": bad}
+        product = normalize_channel3_product({**CHANNEL3_PRODUCT, "offers": [offer]}, SELLERS)
+        assert product["url"] is None
 
 
 def test_product_without_an_in_stock_offer_is_dropped():

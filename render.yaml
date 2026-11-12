@@ -1,0 +1,55 @@
+# Render Blueprint: one web service runs the dashboard, the reconcile poller
+# and the remote MCP endpoint, so all three share one SQLite file on one disk.
+#
+# Secrets marked sync: false are entered in the Render dashboard, never here.
+services:
+  - type: web
+    name: leash
+    runtime: python
+    # Free plan: no disk, so leash.db is wiped on each deploy and the service
+    # sleeps when idle. For a persistent log, switch to `plan: starter`
+    # (~$7/month), add the disk below and point both DB paths at it:
+    #   disk: {name: leash-data, mountPath: /var/data, sizeGB: 1}
+    #   LEASH_DB_PATH=/var/data/leash.db  PAYOUTS_DB_PATH=/var/data/payouts.db
+    plan: free
+    buildCommand: pip install ".[remote,postgres]"
+    startCommand: python -m leash.remote
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # "true": no PayPal calls at all. "false": real PayPal calls to the
+      # sandbox below (test money). Leash refuses to start against any other
+      # PayPal host unless LEASH_ALLOW_LIVE=true is also set.
+      - key: DRY_RUN
+        sync: false
+      - key: LEASH_PUBLIC_HOST
+        sync: false          # e.g. leash.onrender.com or your custom domain
+      - key: LEASH_DASHBOARD_TOKEN
+        sync: false          # the human's approval token
+      - key: LEASH_MCP_TOKEN
+        sync: false          # the agent's token; must differ from the above
+      - key: LEASH_DEMO_TOKEN
+        sync: false          # optional: judges' dashboard token, recorded as judge-demo; must differ from both
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
+      - key: CHANNEL3_API_KEY
+        sync: false
+      # The Ask-the-agent box: Google Gemini's free tier (aistudio.google.com).
+      # LEASH_AGENT_MODEL overrides the model (default gemini-flash-lite-latest).
+      - key: GEMINI_API_KEY
+        sync: false
+      # The whsec_ signing secret of the /webhooks/channel3 endpoint in the
+      # Channel3 dashboard's webhook portal. Turns on the price watch.
+      - key: CHANNEL3_WEBHOOK_SECRET
+        sync: false
+      - key: KERNEL_API_KEY
+        sync: false
+      - key: LEASH_SETTINGS_DATABASE_URL
+        sync: false          # free Neon Postgres; keeps dashboard limit changes across restarts
+      - key: LEASH_SETTINGS_NAMESPACE
+        value: render        # fixed, so changing LEASH_PUBLIC_HOST keeps the limits
