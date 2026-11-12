@@ -4,6 +4,8 @@ Leash is spending control for AI agents that pay vendors on a business's
 behalf. It sits between the agent and PayPal: the agent can ask to pay, and a
 fixed set of rules plus a human decide.
 
+**Demo video (3 min):** https://www.youtube.com/watch?v=rTjoQTGLSOY
+
 The first customer is a small business that lets an AI agent restock
 supplies. The agent finds products and pays approved sellers; the owner sets
 the limits and approves anything large. Paying a seller's PayPal account is
@@ -26,9 +28,14 @@ writes can change the outcome.
 
 ## Try it
 
-Open https://www.agentleash.me and paste the access token from our
-submission. Everything runs on PayPal's sandbox with test money; the products
-are real Channel3 listings.
+**Judges:** open https://www.agentleash.me and paste the judge access token
+into the sign-in box. The token is in our hackathon submission, on the line
+"Judge access token". It isn't in this repo, because the repo is public. It
+signs you in as an approver (`judge-demo`), so you can run the agent, approve
+or deny payments and change limits.
+
+Everything runs on PayPal's sandbox with test money; the products are real
+Channel3 listings.
 
 1. **Small gift**: a Gemini agent searches Channel3 and buys a card under
    $15. It's paid at once, with PayPal's batch and transaction IDs.

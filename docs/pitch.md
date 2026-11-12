@@ -133,6 +133,8 @@ integration.
 > listing is a page we planted for the demo. The products and prices are real
 > Channel3 listings.
 >
+> Demo video: https://www.youtube.com/watch?v=rTjoQTGLSOY
+>
 > Try it at https://www.agentleash.me with the access token below. The free
 > server may take up to a minute to wake on the first load.
 >
