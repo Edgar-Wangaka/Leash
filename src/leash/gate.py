@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterator
 
 from payouts.paypal_client import PayPalClient
 
-from . import events
+from . import accounts, events
 from .db import Database, PostgresDatabase, SqliteDatabase
 from .explainer import current_explanation, explain, llm_risk_signal
 from .policy import Decision, PaymentRequest, amount_to_cents, evaluate, load_policy
@@ -486,6 +486,80 @@ class PaymentGate:
         with self._connect() as connection:
             return int(connection.execute(query, params).fetchone()[0])
 
+    # --- dashboard accounts (named access tokens) ---------------------------
+
+    def create_account(self, name: Any, role: str, created_by: str) -> dict[str, Any]:
+        """Create an account. Returns the account and its token, shown once."""
+        clean = accounts.clean_name(name)
+        if clean is None:
+            return {"ok": False, "reason": "invalid_name"}
+        if role not in accounts.ROLES:
+            return {"ok": False, "reason": "invalid_role"}
+        token = accounts.new_token()
+        account_id = accounts.new_id()
+        with self._connect() as connection:
+            active = connection.execute(
+                "SELECT COUNT(*) FROM accounts WHERE revoked_at IS NULL"
+            ).fetchone()[0]
+            if int(active) >= accounts.MAX_ACTIVE_ACCOUNTS:
+                return {"ok": False, "reason": "too_many_accounts"}
+            taken = connection.execute(
+                "SELECT 1 FROM accounts WHERE revoked_at IS NULL AND LOWER(name) = LOWER(?)",
+                (clean,),
+            ).fetchone()
+            if taken:
+                return {"ok": False, "reason": "name_taken"}
+            connection.execute(
+                "INSERT INTO accounts (id, name, role, token_hash, token_hint, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (account_id, clean, role, accounts.token_hash(token), token[:8] + "…",
+                 created_by, self._now().astimezone(timezone.utc).isoformat()),
+            )
+        account = self.get_account(account_id)
+        return {"ok": True, "account": account, "token": token}
+
+    def get_account(self, account_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {accounts.ACCOUNT_COLUMNS} FROM accounts WHERE id = ?", (account_id,)
+            ).fetchone()
+        return accounts.row_to_account(row) if row else None
+
+    def list_accounts(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {accounts.ACCOUNT_COLUMNS} FROM accounts ORDER BY created_at DESC"
+            ).fetchall()
+        return [accounts.row_to_account(row) for row in rows]
+
+    def account_for_token(self, token: str) -> dict[str, Any] | None:
+        """The active account a token belongs to, or None."""
+        if not token or not token.startswith(accounts.TOKEN_PREFIX):
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {accounts.ACCOUNT_COLUMNS} FROM accounts "
+                "WHERE token_hash = ? AND revoked_at IS NULL",
+                (accounts.token_hash(token),),
+            ).fetchone()
+        return accounts.row_to_account(row) if row else None
+
+    def revoke_account(self, account_id: str, revoked_by: str) -> bool:
+        with self._connect() as connection:
+            changed = connection.execute(
+                "UPDATE accounts SET revoked_at = ?, revoked_by = ? "
+                "WHERE id = ? AND revoked_at IS NULL",
+                (self._now().astimezone(timezone.utc).isoformat(), revoked_by, account_id),
+            ).rowcount
+        return changed == 1
+
+    def touch_account(self, account_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE accounts SET last_used_at = ? WHERE id = ?",
+                (self._now().astimezone(timezone.utc).isoformat(), account_id),
+            )
+
     def has_pending_hold_for(self, product_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -759,6 +833,8 @@ class PaymentGate:
                 "CREATE INDEX IF NOT EXISTS idx_price_events_product "
                 "ON price_events(product_id, event_time)"
             )
+            # Named access tokens for the dashboard (see leash.accounts).
+            accounts.create_tables(connection)
             # One row per "Ask the agent" run, for the per-minute and daily caps.
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS agent_runs "
@@ -822,6 +898,8 @@ class PaymentGate:
                 "CREATE INDEX IF NOT EXISTS idx_price_events_product "
                 "ON price_events(product_id, event_time)"
             )
+            # Named access tokens for the dashboard (see leash.accounts).
+            accounts.create_tables(connection)
             # One row per "Ask the agent" run, for the per-minute and daily caps.
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS agent_runs "
