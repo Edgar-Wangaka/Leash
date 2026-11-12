@@ -4,6 +4,8 @@ Leash is spending control for AI agents that pay vendors on a business's
 behalf. It sits between the agent and PayPal: the agent can ask to pay, and a
 fixed set of rules plus a human decide.
 
+**Demo video (3 min):** https://www.youtube.com/watch?v=rTjoQTGLSOY
+
 The first customer is a small business that lets an AI agent restock
 supplies. The agent finds products and pays approved sellers; the owner sets
 the limits and approves anything large. Paying a seller's PayPal account is
