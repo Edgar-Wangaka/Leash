@@ -75,24 +75,33 @@
   button:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
   .none { padding: 16px 0; font-style: italic; color: var(--muted); border-bottom: 1px solid var(--rule); }
 
-  /* The ledger */
-  .ledger { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; min-width: 860px; }
-  th { text-align: left; padding: 10px 12px 8px 0; border-bottom: 1px solid var(--ink); }
-  td { padding: 14px 12px 14px 0; border-bottom: 1px solid var(--rule); vertical-align: top; }
-  th.r, td.r { text-align: right; }
-  td.when { font: 13px/1.6 var(--mono); color: var(--muted); white-space: nowrap; }
-  td.who { font: 13px/1.6 var(--mono); }
-  td.to div:first-child { font: 500 14px/1.5 var(--mono); white-space: nowrap; }
-  td.to .memo { font-style: italic; color: var(--muted); overflow-wrap: anywhere; }
+  /* The ledger: AG Grid, dressed as the paper ledger. */
+  .ledger-tools { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0 10px; }
+  #ledgerSearch { flex: 1 1 220px; min-width: 0; font: 14px/1.4 var(--mono); padding: 8px 10px;
+    border: 1px solid var(--ink); background: var(--sheet); color: inherit; }
+  #ledgerSearch:focus-visible { outline: 3px solid var(--blue); outline-offset: 1px; }
+  .chips { display: flex; gap: 0; }
+  .chips button, .ledger-tools > button { font-size: 11px; padding: 8px 10px; }
+  .chips button + button { border-left: 0; }
+  .chips button.on, .ledger-tools > button.on { background: var(--navy); color: var(--paper); border-color: var(--navy); }
+  #reasonSummary { font: 12px/1.6 var(--mono); color: var(--blocked); margin: 0 0 8px; min-height: 0; }
+  #ledgerGrid { width: 100%; --ag-auto-height-min-body-height: 60px; }
+  .ag-cell .when { font-family: var(--mono); color: var(--muted); }
+  .ag-cell .to-main { font: 500 13px/1.5 var(--mono); overflow-wrap: anywhere; }
+  .ag-cell .memo { font-style: italic; color: var(--muted); overflow-wrap: anywhere; line-height: 1.4; }
+  .ag-cell.c-why { color: var(--muted); line-height: 1.45; }
+  .ag-cell.c-sum { font: 600 16px var(--mono); }
+  .ag-cell.c-struck { color: var(--blocked); text-decoration: line-through; text-decoration-thickness: 1.5px; }
+  .ag-cell .stamp { margin: 6px 4px 4px 2px; }
+  .ag-cell .wrap { padding: 6px 0; line-height: 1.4; white-space: normal; }
+  #ledgerGrid .ag-cell-wrap-text { line-height: 1.45; padding-top: 8px; padding-bottom: 8px; word-break: normal; overflow-wrap: anywhere; }
+  #ledgerFallback .item { padding: 10px 0; border-bottom: 1px solid var(--rule); font-size: 14px; }
+  .buy { font: 12px/1.6 var(--mono); }
+  .buy a { color: var(--blue); }
   .catalog { font: 12px/1.6 var(--mono); color: var(--blue); overflow-wrap: anywhere; max-width: 420px; }
   .catalog.bad { color: var(--blocked); }
   .moved { font: 12px/1.6 var(--mono); color: var(--blocked); font-weight: 600; max-width: 420px; }
-  td.sum { font: 600 19px/1.2 var(--mono); white-space: nowrap; }
-  tr.is-blocked td.sum { color: var(--blocked); text-decoration: line-through; text-decoration-thickness: 1.5px; }
-  td.why { font-size: 14px; color: var(--muted); min-width: 220px; max-width: 300px; overflow-wrap: anywhere; }
-  td .ref { font: 11px/1.5 var(--mono); color: var(--blue); max-width: 190px; overflow-wrap: anywhere; margin-top: 4px; }
-  tr.fresh td { animation: ink 1.6s ease; }
+  .ref { font: 11px/1.5 var(--mono); color: var(--blue); overflow-wrap: anywhere; margin-top: 2px; }
   .stamp { display: inline-block; font: 700 11px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase;
     padding: 5px 7px; border: 2px solid currentColor; outline: 1px solid currentColor; outline-offset: 2px;
     transform: rotate(-3deg); margin: 3px 4px; white-space: nowrap; }
@@ -250,19 +259,26 @@
   <h2 class="label section">Waiting for your approval <em id="holdcount"></em></h2>
   <div id="holds"></div>
 
-  <h2 class="label section">Payment requests <em>newest first</em></h2>
-  <div class="ledger">
-    <table>
-      <thead><tr>
-        <th class="label">Time</th><th class="label">Agent</th><th class="label">Pay to</th>
-        <th class="label r">Amount</th><th class="label">Outcome</th><th class="label">Why</th>
-      </tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
+  <h2 class="label section">Payment requests <em id="ledgerCount">newest first</em></h2>
+  <div class="ledger-tools">
+    <input id="ledgerSearch" type="search" placeholder="Search payments, sellers, reasons" aria-label="Search payments">
+    <div class="chips" role="group" aria-label="Show payments">
+      <button type="button" class="on" data-outcome="all">All</button>
+      <button type="button" data-outcome="paid">Paid</button>
+      <button type="button" data-outcome="held">Held</button>
+      <button type="button" data-outcome="blocked">Blocked</button>
+    </div>
+    <button type="button" id="byReason" aria-pressed="false">Blocked, by reason</button>
+    <button type="button" id="exportCsv">Export CSV</button>
   </div>
+  <div id="reasonSummary" aria-live="polite"></div>
+  <div id="ledgerGrid"></div>
+  <div id="ledgerFallback" hidden></div>
 
   <div id="error"></div>
 </main>
+<script src="https://cdn.jsdelivr.net/npm/ag-grid-community@36.2.0/dist/ag-grid-community.min.js"
+  integrity="sha384-icvtRKM0YJJgeDhXnWY8UlF1PVBFd4K8Pj61la+vG+EU+awBeoP0xGPZhCD2SQOV" crossorigin="anonymous"></script>
 <script>
   const $ = (id) => document.getElementById(id);
   const el = (tag, cls, text) => {
@@ -290,6 +306,17 @@
 
   // Real retailers have no PayPal sandbox account, so each one is paid
   // through a sandbox account that stands in for it. Say so plainly.
+  // Where to buy it: Channel3's offer link (an affiliate link to the shop).
+  // Shown only for http(s), opened without giving the shop this page.
+  function buyLine(d) {
+    const c = d.catalog, url = c && c.status === "ok" && c.url;
+    if (!url || !/^https?:\/\//i.test(url)) return null;
+    const line = el("div", "buy"), link = el("a", "", "Buy on " + (c.sold_by || "the shop"));
+    link.href = url; link.target = "_blank"; link.rel = "noopener noreferrer";
+    line.append(link);
+    return line;
+  }
+
   function standInLine(d) {
     const c = d.catalog;
     if (currentMode === "live" || !c || c.status !== "ok" || !c.sold_by) return null;
@@ -405,30 +432,169 @@
     }
   }
 
+  // --- The ledger (AG Grid Community). Every cell is built with textContent:
+  // request text comes from agents and sellers and is untrusted.
+  const STAMP_FOR = { paid: "paid", held: "held", blocked: "blocked" };
+  const RULE_LABELS = {
+    cap: "over the cap", daily_budget: "over daily budget", allowlist: "unknown seller",
+    approval_threshold: "needs approval", velocity: "too many requests", duplicate_request_id: "duplicate",
+    unrequested_task: "unapproved task", price_mismatch: "over catalog price", price_unverified: "price unconfirmed",
+    payee_mismatch: "wrong seller", price_spike: "price spike", invalid_amount: "invalid amount",
+    llm_suspicious: "AI check flagged it",
+  };
+  const ruleLabel = (r) => RULE_LABELS[r] || r.replaceAll("_", " ");
+  let grid = null, outcomeFilter = "all", byReason = false;
+  // On a phone, drop the two columns a judge needs least.
+  const PHONE = window.matchMedia("(max-width: 640px)");
+  PHONE.addEventListener("change", () => grid && grid.setColumnsVisible(["agent_id", "reasonsText"], !PHONE.matches));
+  const ledgerRows = (decisions) => decisions.map((d) => {
+    const [text, cls] = outcome(d);
+    return { ...d, outcomeText: text, outcomeClass: cls, amount: Number(d.amount_usd),
+             reasonsText: (d.reasons || []).map(ruleLabel).join(", "), soldBy: (d.catalog && d.catalog.sold_by) || "" };
+  });
+
+  function payToCell(p) {
+    const d = p.data, box = el("div", "wrap");
+    box.append(el("div", "to-main", d.merchant_email), el("div", "memo", d.reason));
+    const product = catalogLine(d); if (product) box.append(product);
+    const standIn = standInLine(d); if (standIn) box.append(standIn);
+    const buy = buyLine(d); if (buy) box.append(buy);
+    return box;
+  }
+  function outcomeCell(p) {
+    const d = p.data, box = el("div", "wrap");
+    box.append(el("span", "stamp " + d.outcomeClass, d.outcomeText));
+    if (d.paypal_batch_id) box.append(el("div", "ref", "PayPal batch " + d.paypal_batch_id));
+    if (d.paypal_transaction_id) box.append(el("div", "ref", "PayPal transaction " + d.paypal_transaction_id));
+    if (d.paypal_status && d.paypal_batch_id) box.append(el("div", "ref", "PayPal says " + d.paypal_status));
+    if (d.error_name) box.append(el("div", "ref", d.error_name));
+    return box;
+  }
+  const whenCell = (p) => el("span", "when", new Date(p.value).toLocaleTimeString());
+
+  function makeGrid() {
+    if (!window.agGrid) return null;
+    const theme = agGrid.themeQuartz.withParams({
+      backgroundColor: "#fbf8f1", foregroundColor: "#18160f", headerBackgroundColor: "#f4f0e6",
+      headerTextColor: "#003087", borderColor: "#cdc5b3", accentColor: "#0070ba",
+      rowHoverColor: "rgba(255, 196, 57, 0.16)", fontFamily: "inherit",
+      headerFontFamily: "ui-monospace, Menlo, Consolas, monospace", headerFontWeight: 600, fontSize: 14,
+    });
+    return agGrid.createGrid($("ledgerGrid"), {
+      theme,
+      rowData: [],
+      domLayout: "autoHeight",
+      // Few columns: draw them all, so auto row height measures every cell.
+      suppressColumnVirtualisation: true,
+      pagination: true, paginationPageSize: 15, paginationPageSizeSelector: [15, 50, 100],
+      getRowId: (p) => p.data.request_id,
+      overlayNoRowsTemplate: "No requests yet. New ones appear here automatically.",
+      defaultColDef: { sortable: true, resizable: true, suppressMovable: true, wrapText: true, autoHeight: true },
+      columnDefs: [
+        { headerName: "Time", field: "created_at", sort: "desc", width: 115, cellRenderer: whenCell,
+          tooltipValueGetter: (p) => new Date(p.value).toLocaleString() },
+        { headerName: "Agent", field: "agent_id", width: 135, hide: PHONE.matches },
+        { headerName: "Pay to", field: "merchant_email", flex: 2, minWidth: 270, cellRenderer: payToCell,
+          getQuickFilterText: (p) => [p.data.merchant_email, p.data.reason, p.data.soldBy].join(" ") },
+        { headerName: "Amount", field: "amount", type: "rightAligned", width: 115, cellClass: "c-sum",
+          valueFormatter: (p) => money(p.value),
+          cellClassRules: { "c-struck": (p) => p.data && p.data.verdict === "block" } },
+        { headerName: "Outcome", field: "outcomeText", width: 210, cellRenderer: outcomeCell },
+        { headerName: "Rules", field: "reasonsText", width: 170, hide: PHONE.matches },
+        { headerName: "Why", field: "explanation", flex: 2, minWidth: 260, cellClass: "c-why" },
+        // Hidden, but included in the CSV export.
+        { headerName: "Request ID", field: "request_id", hide: true },
+        { headerName: "Seller site", field: "soldBy", hide: true },
+        { headerName: "PayPal batch", field: "paypal_batch_id", hide: true },
+        { headerName: "PayPal transaction", field: "paypal_transaction_id", hide: true },
+        { headerName: "PayPal status", field: "paypal_status", hide: true },
+      ],
+      isExternalFilterPresent: () => outcomeFilter !== "all",
+      doesExternalFilterPass: (node) => node.data.outcomeClass === STAMP_FOR[outcomeFilter],
+      onFilterChanged: () => updateCount(),
+      onPaginationChanged: () => updateCount(),
+    });
+  }
+
+  function updateCount() {
+    if (!grid) return;
+    const shown = grid.getDisplayedRowCount(), total = grid.getGridOption("rowData").length;
+    $("ledgerCount").textContent = shown === total ? "newest first" : shown + " of " + total + " shown";
+  }
+
+  function reasonSummary(rows) {
+    if (!byReason) { $("reasonSummary").textContent = ""; return; }
+    const counts = {};
+    for (const r of rows) if (r.verdict === "block") for (const why of r.reasons || []) counts[why] = (counts[why] || 0) + 1;
+    const parts = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([k, n]) => ruleLabel(k) + " " + n);
+    $("reasonSummary").textContent = parts.length ? "Blocked, by rule: " + parts.join(" · ") : "Nothing blocked yet.";
+  }
+
   function renderLedger(decisions) {
-    const rows = $("rows"); rows.replaceChildren();
-    if (!decisions.length) {
-      const row = el("tr"), cell = el("td", "why", "No requests yet. New ones appear here automatically.");
-      cell.colSpan = 6; row.append(cell); rows.append(row);
+    const rows = ledgerRows(decisions);
+    if (!grid) grid = makeGrid();
+    if (!grid) return renderFallback(rows);
+    const fresh = rows.filter((r) => !firstRender && !seen.has(r.request_id)).map((r) => r.request_id);
+    rows.forEach((r) => seen.add(r.request_id));
+    grid.setGridOption("rowData", rows);
+    if (fresh.length) {
+      const nodes = fresh.map((id) => grid.getRowNode(id)).filter(Boolean);
+      grid.flashCells({ rowNodes: nodes, flashDuration: 1600, fadeDuration: 800 });
     }
-    for (const d of decisions) {
-      const [text, cls] = outcome(d);
-      const row = el("tr", "is-" + cls + (!firstRender && !seen.has(d.request_id) ? " fresh" : ""));
-      seen.add(d.request_id);
-      const to = el("td", "to"); to.append(el("div", "", d.merchant_email), el("div", "memo", d.reason));
-      const product = catalogLine(d); if (product) to.append(product);
-      const standIn = standInLine(d); if (standIn) to.append(standIn);
-      const result = el("td"); result.append(el("span", "stamp " + cls, text));
-      if (d.paypal_batch_id) result.append(el("div", "ref", "PayPal batch " + d.paypal_batch_id));
-      if (d.paypal_transaction_id) result.append(el("div", "ref", "PayPal transaction " + d.paypal_transaction_id));
-      if (d.paypal_status && d.paypal_batch_id) result.append(el("div", "ref", "PayPal says " + d.paypal_status));
-      if (d.error_name) result.append(el("div", "ref", d.error_name));
-      row.append(el("td", "when", new Date(d.created_at).toLocaleTimeString()), el("td", "who", d.agent_id),
-        to, el("td", "sum r", money(d.amount_usd)), result, el("td", "why", d.explanation));
-      rows.append(row);
+    reasonSummary(rows);
+    updateCount();
+    firstRender = false;
+  }
+
+  // If the grid library could not load, the ledger still shows as a plain list.
+  function renderFallback(rows) {
+    const box = $("ledgerFallback"); box.hidden = false; box.replaceChildren();
+    $("ledgerGrid").hidden = true;
+    if (!rows.length) box.append(el("div", "item", "No requests yet. New ones appear here automatically."));
+    for (const r of rows) {
+      const item = el("div", "item");
+      item.append(el("span", "stamp " + r.outcomeClass, r.outcomeText),
+        el("div", "", new Date(r.created_at).toLocaleTimeString() + " · " + r.agent_id + " · " + money(r.amount) + " to " + r.merchant_email),
+        el("div", "memo", r.explanation || ""));
+      box.append(item);
     }
     firstRender = false;
   }
+
+  // Auto row heights follow the wrapped text; redraw once web fonts have loaded.
+  if (document.fonts) document.fonts.ready.then(() => grid && grid.redrawRows());
+  $("ledgerSearch").addEventListener("input", (e) => grid && grid.setGridOption("quickFilterText", e.target.value));
+  for (const chip of document.querySelectorAll("[data-outcome]")) {
+    chip.onclick = () => {
+      outcomeFilter = chip.dataset.outcome;
+      for (const c of document.querySelectorAll("[data-outcome]")) c.classList.toggle("on", c === chip);
+      if (byReason && outcomeFilter !== "blocked") setByReason(false, { keepFilter: true });
+      if (grid) grid.onFilterChanged();
+    };
+  }
+  function setByReason(on, { keepFilter = false } = {}) {
+    byReason = on;
+    if (!on && !keepFilter) {
+      outcomeFilter = "all";
+      for (const c of document.querySelectorAll("[data-outcome]")) c.classList.toggle("on", c.dataset.outcome === "all");
+    }
+    $("byReason").classList.toggle("on", on); $("byReason").setAttribute("aria-pressed", String(on));
+    if (!grid) return;
+    if (on) {
+      outcomeFilter = "blocked";
+      for (const c of document.querySelectorAll("[data-outcome]")) c.classList.toggle("on", c.dataset.outcome === "blocked");
+      grid.applyColumnState({ state: [{ colId: "reasonsText", sort: "asc", sortIndex: 0 },
+                                     { colId: "created_at", sort: "desc", sortIndex: 1 }], defaultState: { sort: null } });
+    } else {
+      grid.applyColumnState({ state: [{ colId: "created_at", sort: "desc" }], defaultState: { sort: null } });
+    }
+    grid.onFilterChanged();
+    reasonSummary(grid.getGridOption("rowData"));
+  }
+  $("byReason").onclick = () => setByReason(!byReason);
+  $("exportCsv").onclick = () => grid && grid.exportDataAsCsv({
+    fileName: "leash-payments-" + new Date().toISOString().slice(0, 10) + ".csv", allColumns: true,
+  });
 
   async function refresh() {
     try {
