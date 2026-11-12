@@ -28,8 +28,6 @@ In this demo (PayPal sandbox, test money only):
 - Every decision is logged with its reason, exports to CSV, and limits change from the dashboard.
 - An agent tries to buy a $350 stand mixer, over the $100 cap: blocked.
 
-Narrated as a short story: Maya, an events planner, hands her shopping to an AI agent and keeps it on a leash.
-
 Try it: https://www.agentleash.me
 Code: https://github.com/Edgar-Wangaka/Leash
 Postman workspace (API and attack tests): https://app.getpostman.com/run-collection/59387021-212e4c48-f29a-4b46-9b4d-3151e416cdc9?action=collection%2Ffork&source=rip_markdown&collection-url=entityId%3D59387021-212e4c48-f29a-4b46-9b4d-3151e416cdc9%26entityType%3Dcollection%26workspaceId%3D8ebb3b4e-6964-4ee0-aba7-3a290a44eaa8
@@ -45,13 +43,13 @@ How it's built:
 - Postman attacks the API (wrong tokens, cross-site requests) on every push.
 
 Chapters
-0:00 Meet Maya
-0:18 The deal: the agent asks, the rules decide
-0:34 Monday: a $4.99 card, paid through PayPal Payouts
+0:00 Meet Leash
+0:18 How it works: the agent asks, the rules decide
+0:34 A $4.99 card, paid through PayPal Payouts
 1:01 A bigger ask: held for approval
-1:24 The bad day: a hijacked agent tries to send $500
-1:47 Friday: the ledger, CSV export and limits
-2:10 The mixer: over the cap
+1:24 The attack: a hijacked agent tries to send $500
+1:47 The ledger: reasons, CSV export and limits
+2:10 Over the cap: a $350 mixer, blocked
 2:22 Under the hood: MCP, Gemini, Channel3, PayPal, Neon, Render, Kernel, Postman
 2:48 Leash
 ---
