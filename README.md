@@ -26,9 +26,14 @@ writes can change the outcome.
 
 ## Try it
 
-Open https://www.agentleash.me and paste the access token from our
-submission. Everything runs on PayPal's sandbox with test money; the products
-are real Channel3 listings.
+**Judges:** open https://www.agentleash.me and paste the judge access token
+into the sign-in box. The token is in our hackathon submission, on the line
+"Judge access token". It isn't in this repo, because the repo is public. It
+signs you in as an approver (`judge-demo`), so you can run the agent, approve
+or deny payments and change limits.
+
+Everything runs on PayPal's sandbox with test money; the products are real
+Channel3 listings.
 
 1. **Small gift**: a Gemini agent searches Channel3 and buys a card under
    $15. It's paid at once, with PayPal's batch and transaction IDs.
