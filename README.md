@@ -1,8 +1,15 @@
 # Leash
 
-Leash is a payment gate that sits between an AI agent and PayPal. It puts
-spending limits and human approval in front of every payment the agent tries
-to make.
+Leash is spending control for AI agents that pay vendors on a business's
+behalf. It sits between the agent and PayPal and puts spending limits and
+human approval in front of every payment the agent tries to make.
+
+The first customer it is built for is a small business that lets an AI agent
+restock supplies: the agent finds products and pays approved sellers, and the
+owner sets the limits and approves anything large. Paying a seller's PayPal
+account is what PayPal Payouts is for, so Leash sends approved payments
+through Payouts. A shopper paying at a checkout is a different flow (PayPal
+Orders); that is the next integration, not this one.
 
 An agent that shops reads product pages written by strangers, and a sentence
 hidden in one of those pages can tell it to send money to someone else. With
@@ -445,8 +452,14 @@ Three things are mocked:
 - The hostile listing. `config/planted_listings.json` is added to every
   Channel3 result on purpose, to show an injection attempt. Set
   `LEASH_PLANT_INJECTION=false` to turn it off.
-- The fallback catalog in `config/mock_catalog.json`, and the test
-  request buttons, which send fixed requests and involve no AI.
+- The fallback catalog in `config/mock_catalog.json`, used only when no
+  Channel3 key is set. The "Hijacked agent (no AI)" button plays a naive
+  agent with fixed code, and says so on its label.
+
+Real: the "Ask the agent" box uses a real model (Gemini) and real Channel3
+search, every approved payment is a real PayPal sandbox payout with PayPal's
+own batch and transaction IDs, and the "Buy on …" link is Channel3's live
+offer link to the shop.
 
 An optional LLM risk check can escalate a payment to human review. It cannot
 relax a rule, and it is off unless `LLM_BASE_URL` and `LLM_MODEL` are set.
