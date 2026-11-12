@@ -1,6 +1,6 @@
 # YouTube upload: Leash demo video
 
-**File:** `leash-demo-final.mp4`, your iMovie export of `leash-demo-3min.mp4` with your voice (1920 × 1080, 2:57). Fallback: `leash-demo-v1.mp4` (1:57, computer voice).
+**File:** `leash-demo-final.mp4`, your narration fitted to the video (1920 × 1080, 2:58). Fallback: `leash-demo-v1.mp4` (1:57, computer voice).
 
 **Visibility:** Unlisted (anyone with the link can watch; it won't show up in
 search). Switch to Public only if the hackathon rules ask for it.
@@ -44,14 +44,14 @@ How it's built:
 
 Chapters
 0:00 Meet Leash
-0:18 How it works: the agent asks, the rules decide
-0:34 A $4.99 card, paid through PayPal Payouts
-1:01 A bigger ask: held for approval
-1:24 The attack: a hijacked agent tries to send $500
-1:47 The ledger: reasons, CSV export and limits
-2:10 Over the cap: a $350 mixer, blocked
-2:22 Under the hood: MCP, Gemini, Channel3, PayPal, Neon, Render, Kernel, Postman
-2:48 Leash
+0:16 How it works: the agent asks, the rules decide
+0:33 A $4.99 card, paid through PayPal Payouts
+0:57 A bigger ask: held for approval
+1:23 The attack: a hijacked agent tries to send $500
+1:45 The ledger: reasons, CSV export and limits
+2:08 Over the cap: a $350 mixer, blocked
+2:21 Under the hood: MCP, Gemini, Channel3, PayPal, Neon, Render, Kernel, Postman
+2:50 Leash
 ---
 
 ## Upload checklist
