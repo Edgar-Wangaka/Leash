@@ -9,6 +9,7 @@ from payouts.paypal_client import PayPalClient
 
 def test_same_idempotency_key_sends_once(tmp_path, monkeypatch):
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.delenv("DRY_RUN", raising=False)  # these mock PayPal; CI sets DRY_RUN
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PAYPAL_BASE_URL", "https://paypal.test")
     calls = []
@@ -36,6 +37,7 @@ def test_same_idempotency_key_sends_once(tmp_path, monkeypatch):
 
 def test_self_pay_error_is_recorded_as_failed(tmp_path, monkeypatch):
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.delenv("DRY_RUN", raising=False)  # these mock PayPal; CI sets DRY_RUN
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
 
     def handler(request):

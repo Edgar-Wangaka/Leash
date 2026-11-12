@@ -93,6 +93,7 @@ def test_paypal_error_name_wins_over_the_status(tmp_path):
 
 def test_client_wait_stops_on_a_returned_item(tmp_path, monkeypatch):
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.delenv("DRY_RUN", raising=False)  # these mock PayPal; CI sets DRY_RUN
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PAYPAL_BASE_URL", "https://paypal.test")
     status_calls = []
@@ -127,6 +128,7 @@ def test_client_wait_stops_on_a_returned_item(tmp_path, monkeypatch):
 
 def test_client_keeps_waiting_while_the_item_is_on_hold(tmp_path, monkeypatch):
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.delenv("DRY_RUN", raising=False)  # these mock PayPal; CI sets DRY_RUN
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PAYPAL_BASE_URL", "https://paypal.test")
     item_statuses = ["ONHOLD", "SUCCESS"]
@@ -161,6 +163,7 @@ def test_client_keeps_waiting_while_the_item_is_on_hold(tmp_path, monkeypatch):
 def test_client_records_success_when_the_item_is_paid_before_the_batch_finishes(tmp_path, monkeypatch):
     # Seen in the PayPal sandbox: item SUCCESS while the batch is PROCESSING.
     monkeypatch.setenv("PAYPAL_CLIENT_ID", "client-id")
+    monkeypatch.delenv("DRY_RUN", raising=False)  # these mock PayPal; CI sets DRY_RUN
     monkeypatch.setenv("PAYPAL_CLIENT_SECRET", "client-secret")
     monkeypatch.setenv("PAYPAL_BASE_URL", "https://paypal.test")
 
