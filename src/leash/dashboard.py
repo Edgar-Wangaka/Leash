@@ -22,12 +22,13 @@ import logging
 import os
 import secrets
 import threading
+import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from . import browser, config, events, price_watch, settings, web_agent
+from . import accounts, browser, config, events, price_watch, settings, web_agent
 from .catalog import price_lookup_from_env
 from .db import database_from_env
 from .events import public_record
@@ -137,6 +138,73 @@ def public_hosts_from_env() -> list[str]:
     return [host.strip().lower() for host in raw.split(",") if host.strip()]
 
 
+# What each POST route needs (see leash.accounts.PERMISSIONS).
+ROUTE_PERMISSIONS = {
+    "/api/approve": "approve",
+    "/api/deny": "approve",
+    "/api/simulate": "approve",
+    "/api/agent/run": "agent",
+    "/api/agent/hijack": "agent",
+    "/api/settings": "limits",
+    "/api/accounts": "accounts",
+    "/api/accounts/revoke": "accounts",
+}
+
+
+class _AccountCache:
+    """Remembers token-to-account lookups briefly.
+
+    The page polls every 1.5 s; without this every poll would query the
+    database for the account. A revoke clears it at once in this process.
+    Last use is written at most every few minutes per account.
+    """
+
+    TTL_SECONDS = 30.0
+    TOUCH_SECONDS = 300.0
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._entries: dict[str, tuple[float, dict[str, Any] | None]] = {}
+        self._touched: dict[str, float] = {}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def lookup(self, gate: PaymentGate, sent: str) -> dict[str, Any] | None:
+        if not sent.startswith(accounts.TOKEN_PREFIX):
+            return None
+        key = accounts.token_hash(sent)
+        now = time.monotonic()
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit and now - hit[0] < self.TTL_SECONDS:
+                account = hit[1]
+            else:
+                account = None
+                hit = None
+        if hit is None:
+            try:
+                account = gate.account_for_token(sent)
+            except Exception as error:  # a database hiccup is "not signed in", never a crash
+                logger.warning("Account lookup failed: %s", error.__class__.__name__)
+                return None
+            with self._lock:
+                if len(self._entries) > 1000:
+                    self._entries.clear()
+                self._entries[key] = (now, account)
+        if account is not None and now - self._touched.get(account["id"], -1e9) > self.TOUCH_SECONDS:
+            self._touched[account["id"]] = now
+            try:
+                gate.touch_account(account["id"])
+            except Exception:
+                pass
+        return account
+
+
+_account_cache = _AccountCache()
+
+
 def make_handler(
     gate: PaymentGate, token: str, public_hosts: list[str] | None = None,
     demo_token: str | None = None,
@@ -176,15 +244,40 @@ def make_handler(
             host = self.headers.get("Host", "").lower()
             return host in self._allowed_hosts() or host in public
 
+        def _identity(self) -> dict[str, Any] | None:
+            """Who is acting, and with which role; None for no valid token.
+
+            The owner holds LEASH_DASHBOARD_TOKEN; LEASH_DEMO_TOKEN is an
+            approver named judge-demo; anyone else signs in with the token of
+            an account the owner created (see leash.accounts).
+            """
+            sent = self.headers.get(TOKEN_HEADER, "")
+            if secrets.compare_digest(sent.encode(), token.encode()):
+                return {"name": APPROVER, "role": "owner", "id": None}
+            if demo_token is not None and secrets.compare_digest(sent.encode(), demo_token.encode()):
+                return {"name": DEMO_APPROVER, "role": "approver", "id": None}
+            account = _account_cache.lookup(gate, sent)
+            if account is None:
+                return None
+            return {"name": account["name"], "role": account["role"], "id": account["id"]}
+
         def _who(self) -> str | None:
-            """Who is acting: the human, a judge with the demo token, or nobody."""
-            sent = self.headers.get(TOKEN_HEADER, "").encode()
-            human = secrets.compare_digest(sent, token.encode())
-            judge = demo_token is not None and secrets.compare_digest(sent, demo_token.encode())
-            return APPROVER if human else DEMO_APPROVER if judge else None
+            identity = self._identity()
+            return identity["name"] if identity else None
 
         def _authorized(self) -> bool:
-            return self._who() is not None
+            return self._identity() is not None
+
+        def _require(self, permission: str) -> dict[str, Any] | None:
+            """The identity if it may do this; otherwise answer 401/403 and return None."""
+            identity = self._identity()
+            if identity is None:
+                self._json(401, {"error": "token_required"})
+                return None
+            if not accounts.can(identity["role"], permission):
+                self._json(403, {"error": "not_allowed", "role": identity["role"]})
+                return None
+            return identity
 
         def _same_origin(self) -> bool:
             # Refuse cross-site form posts: a web page the user happens to
@@ -218,10 +311,16 @@ def make_handler(
                         "text/html; charset=utf-8",
                     )
             elif self.path == "/api/state":
-                if not self._authorized():
-                    self._json(401, {"error": "token_required"})
+                identity = self._require("read")
+                if identity is None:
                     return
-                self._json(200, build_state(gate))
+                state = build_state(gate)
+                state["me"] = {"name": identity["name"], "role": identity["role"]}
+                self._json(200, state)
+            elif self.path == "/api/accounts":
+                if self._require("accounts") is None:
+                    return
+                self._json(200, {"accounts": gate.list_accounts(), "roles": list(accounts.ROLES)})
             else:
                 self._json(404, {"error": "not_found"})
 
@@ -269,8 +368,15 @@ def make_handler(
             if self.path == price_watch.WEBHOOK_PATH:
                 self._channel3_webhook()
                 return
-            if not self._authorized():
-                self._json(401, {"error": "token_required"})
+            permission = ROUTE_PERMISSIONS.get(self.path)
+            if permission is None:
+                if not self._authorized():
+                    self._json(401, {"error": "token_required"})
+                    return
+                self._json(404, {"error": "not_found"})
+                return
+            identity = self._require(permission)
+            if identity is None:
                 return
             try:
                 length = min(int(self.headers.get("Content-Length", 0)), 10_000)
@@ -282,7 +388,17 @@ def make_handler(
                 self._json(400, {"error": "bad_json"})
                 return
 
-            who = self._who() or APPROVER
+            who = identity["name"]
+            if self.path == "/api/accounts":
+                result = gate.create_account(body.get("name"), str(body.get("role", "")), who)
+                self._json(200 if result["ok"] else 400, result)
+                return
+            if self.path == "/api/accounts/revoke":
+                revoked = gate.revoke_account(str(body.get("id", "")), who)
+                _account_cache.clear()
+                self._json(200 if revoked else 404,
+                           {"ok": revoked, "reason": None if revoked else "not_found_or_revoked"})
+                return
             if self.path == "/api/approve":
                 result = gate.approve(str(body.get("request_id", "")), who)
             elif self.path == "/api/deny":
