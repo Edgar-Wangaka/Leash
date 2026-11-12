@@ -16,3 +16,11 @@ submission/
 .env.*.local
 .neon
 node_modules/
+
+# Local tooling, not part of the project
+.claude/
+.vscode/
+skills-lock.json
+graphify-out/
+CLAUDE.md
+node_modules/

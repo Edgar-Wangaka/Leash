@@ -3,8 +3,7 @@
 For the YouTube submission video, recorded at https://www.agentleash.me. Say
 the lines in quotes. Do the actions in brackets. The agent takes 10 to 20
 seconds a run, so keep talking over the wait or cut it in the edit. The
-timings below are after the cuts. This script matches the rehearsal in
-`docs/after-action/demo-rehearsal.md`.
+timings below are after the cuts.
 
 ## Before you record
 
