@@ -362,6 +362,26 @@ needed no approval counts from when it was requested; a held payment counts
 from when you approved it. Payouts that PayPal reports as unclaimed still
 count, because the money has left the account.
 
+### Accounts: who can sign in
+
+The owner is whoever holds `LEASH_DASHBOARD_TOKEN`. To let someone else in,
+open **Manage access** on the dashboard, enter their name, pick a role, and
+click **Create access token**. Leash shows their token once, with a "Copy
+sign-in link" button; send it to them privately. Leash keeps only a SHA-256
+hash of each token, so a copy of the database can't be used to sign in.
+
+| Role | Can |
+|---|---|
+| Viewer | See the dashboard and the ledger |
+| Approver | Also approve or deny payments, run the agent, change limits |
+| Owner | Also create and revoke accounts |
+
+Every approval, denial and limit change is recorded under the person's name.
+**Revoke** stops a token on the person's next request. `LEASH_DEMO_TOKEN`, if
+set, still works as an approver named `judge-demo`. The agent's MCP token is
+separate and can never sign in to the dashboard. The API is
+`GET/POST /api/accounts` and `POST /api/accounts/revoke`, owner only.
+
 ### Changing the limits
 
 You can change the cap, the daily budget, the approval threshold, requests per

@@ -226,3 +226,17 @@ def test_payout_records_survive_a_restart(pg, monkeypatch):
         again = after_restart.send_payout("key-1", SELLER, "8.00", "n")
     assert again["paypal_batch_id"] == "B1"
     assert len(posts) == 1  # never sent twice
+
+
+@needs_pg
+def test_accounts_work_in_postgres(pg):
+    _, make = pg
+    with make() as gate:
+        created = gate.create_account("Judge: Pooja", "approver", "human-dashboard")
+        assert created["ok"]
+        assert gate.create_account("judge: pooja", "viewer", "x")["reason"] == "name_taken"
+        assert gate.account_for_token(created["token"])["role"] == "approver"
+        gate.touch_account(created["account"]["id"])
+        assert gate.list_accounts()[0]["last_used_at"]
+        assert gate.revoke_account(created["account"]["id"], "human-dashboard")
+        assert gate.account_for_token(created["token"]) is None

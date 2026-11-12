@@ -43,6 +43,25 @@
         "leash.dashboard"
       ],
       "port": 8789
+    },
+    {
+      "name": "leash-dashboard-accounts-test",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": [
+        "DRY_RUN=true",
+        "LEASH_DASHBOARD_PORT=8790",
+        "PYTHONPATH=src",
+        "LEASH_DB_PATH=leash-accounts-test.db",
+        "PAYOUTS_DB_PATH=payouts-accounts-test.db",
+        "DATABASE_URL=",
+        "DATABASE_URL_UNPOOLED=",
+        "LEASH_SETTINGS_DATABASE_URL=",
+        "LEASH_SETTINGS_DATABASE_URL_UNPOOLED=",
+        ".venv/bin/python",
+        "-m",
+        "leash.dashboard"
+      ],
+      "port": 8790
     }
   ]
 }

@@ -125,6 +125,25 @@
   #signin p { margin: 0; font-size: 14px; color: var(--muted); }
   #signin .bad { color: var(--blocked); font: 13px var(--mono); }
   #signout { font-size: 11px; padding: 6px 8px; margin-left: 10px; }
+  #whoami { font: 12px/1.4 var(--mono); color: var(--muted); }
+  details.access { margin-top: 10px; border-top: 1px solid var(--rule); padding-top: 10px; }
+  details.access > summary { cursor: pointer; font: 700 12px/1.6 var(--mono); letter-spacing: .12em;
+    text-transform: uppercase; color: var(--navy); }
+  details.access > summary:focus-visible { outline: 3px solid var(--blue); outline-offset: 2px; }
+  #accountForm { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-top: 12px; }
+  #accountForm label { display: grid; gap: 4px; font-size: 14px; }
+  #accountForm input, #accountForm select { font: 15px/1.4 var(--mono); padding: 7px 9px; border: 1px solid var(--ink);
+    background: transparent; color: inherit; min-width: 0; }
+  #newToken { margin-top: 12px; padding: 12px 14px; border: 2px solid var(--navy); background: var(--sheet); display: grid; gap: 8px; }
+  #newToken[hidden] { display: none; }
+  #newToken code { font: 13px/1.5 var(--mono); overflow-wrap: anywhere; user-select: all; }
+  #newToken .warn { color: var(--blocked); font: 12px/1.4 var(--mono); }
+  #accountList { list-style: none; padding: 0; margin: 12px 0 0; font: 13px/1.6 var(--mono); }
+  #accountList li { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; padding: 6px 0;
+    border-bottom: 1px solid var(--rule); }
+  #accountList li.revoked { color: var(--muted); text-decoration: line-through; }
+  #accountList button { font-size: 10px; padding: 5px 7px; }
+  #accountStatus { font-size: 14px; color: var(--muted); }
 
   .agent-box { margin-top: 30px; }
   #askForm { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
@@ -135,7 +154,7 @@
   .examples button { font-size: 11px; padding: 7px 9px; border-color: var(--muted); color: var(--muted); }
   .examples button:hover { border-color: var(--ink); color: var(--ink); }
   .examples button.attack { border-color: var(--blocked); color: var(--blocked); }
-  .agent-box .hint { font-size: 14px; color: var(--muted); margin: 8px 0 0; }
+  .agent-box .hint, .access .hint { font-size: 14px; color: var(--muted); margin: 8px 0 0; max-width: 760px; }
   #askOut { margin-top: 14px; display: grid; gap: 8px; }
   #askOut .step { font: 13px/1.6 var(--mono); padding-left: 12px; border-left: 3px solid var(--rule); overflow-wrap: anywhere; }
   #askOut .step.pay { border-left-color: var(--navy); }
@@ -178,6 +197,7 @@
     <h1>Leash</h1>
     <p>Spending control for AI agents that pay vendors: limits and human approval in front of every PayPal payment.</p>
     <span id="mode" class="down">Connecting</span>
+    <span id="whoami" aria-live="polite"></span>
     <button id="signout" type="button" hidden>Sign out</button>
   </header>
 
@@ -212,6 +232,28 @@
     </div>
   </section>
 
+  <details class="access" id="access" hidden>
+    <summary>Manage access</summary>
+    <p class="hint">Give each person their own access token. Viewers can only look. Approvers can also approve
+      payments, run the agent and change limits. Owners can also manage access. Every action is logged under the
+      person's name, and you can revoke a token at any time.</p>
+    <form id="accountForm">
+      <label>Name<input id="accountName" maxlength="60" autocomplete="off" placeholder="Judge: Pooja" required></label>
+      <label>Role<select id="accountRole">
+        <option value="approver" selected>Approver</option><option value="viewer">Viewer</option><option value="owner">Owner</option>
+      </select></label>
+      <button class="sign" type="submit">Create access token</button>
+      <span id="accountStatus" role="status"></span>
+    </form>
+    <div id="newToken" hidden>
+      <div><b id="newTokenFor"></b>: here is their token. Copy it now; Leash won't show it again.</div>
+      <code id="newTokenValue"></code>
+      <div><button type="button" id="copyToken">Copy sign-in link</button></div>
+      <div class="warn">Send it privately. Anyone with this token can act as this person until you revoke it.</div>
+    </div>
+    <ul id="accountList"></ul>
+  </details>
+
   <details class="limits" id="limits">
     <summary>Change limits</summary>
     <form id="limitForm" novalidate>
@@ -239,7 +281,7 @@
     <ul id="limitHistory"></ul>
   </details>
 
-  <section class="agent-box" aria-label="Ask the agent">
+  <section class="agent-box" id="agentBox" aria-label="Ask the agent">
     <h2 class="label section">Ask the agent to buy something <em id="agentModel"></em></h2>
     <form id="askForm">
       <input id="askInput" maxlength="300" autocomplete="off" placeholder="Buy a birthday card under $15">
@@ -428,7 +470,8 @@
       const act = (path) => { sign.disabled = refuse.disabled = true; post(path, { request_id: d.request_id }); };
       sign.onclick = () => act("/api/approve"); refuse.onclick = () => act("/api/deny");
       actions.append(sign, refuse);
-      slip.append(el("div", "sum", money(d.amount_usd)), body, actions);
+      slip.append(el("div", "sum", money(d.amount_usd)), body);
+      if (canDo("approve")) slip.append(actions);
       box.append(slip);
     }
   }
@@ -623,6 +666,7 @@
       lastState = text;
       const state = JSON.parse(text);
       renderRules(state);
+      applyRole(state.me);
       renderLimits(state.settings);
       const a = state.agent || {};
       $("agentModel").textContent = a.model ? a.mode + " · " + a.model : "no AI model set: rule-based agent";
@@ -806,13 +850,88 @@
       el("div", "answer", "Leash blocked the payment, so no money moved."));
   };
 
+  // Who is signed in decides what the page offers (the server enforces it too).
+  const PERMS = { viewer: ["read"], approver: ["read", "approve", "agent", "limits"],
+                  owner: ["read", "approve", "agent", "limits", "accounts"] };
+  let me = null;
+  const canDo = (p) => !!me && (PERMS[me.role] || []).includes(p);
+  function applyRole(who) {
+    const changed = !me || !who || me.role !== who.role || me.name !== who.name;
+    me = who || null;
+    const shown = { "human-dashboard": "the owner", "judge-demo": "the judges' token" }[me && me.name] || (me && me.name);
+    $("whoami").textContent = !me ? "" : me.name === "human-dashboard" ? "Signed in as the owner"
+      : "Signed in as " + shown + " (" + me.role + ")";
+    $("agentBox").hidden = !canDo("agent");
+    $("limits").hidden = !canDo("limits");
+    $("access").hidden = !canDo("accounts");
+    if (changed && canDo("accounts") && $("access").open) loadAccounts();
+  }
+
+  async function accountsCall(path, body) {
+    const response = await fetch(path, body === undefined ? { headers: { "X-Leash-Token": token } } : {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Leash-Token": token },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 401) { askForToken(true); return null; }
+    return response.json();
+  }
+
+  const ACCOUNT_ERRORS = { invalid_name: "Give the account a name (up to 60 characters).",
+    invalid_role: "Pick a role.", name_taken: "An active account already has that name.",
+    too_many_accounts: "That's the limit of active accounts. Revoke one first." };
+
+  async function loadAccounts() {
+    const result = await accountsCall("/api/accounts");
+    if (!result || !result.accounts) return;
+    const list = $("accountList"); list.replaceChildren();
+    if (!result.accounts.length) list.append(el("li", "", "No accounts yet. You're signed in with the owner token."));
+    for (const a of result.accounts) {
+      const item = el("li", a.revoked_at ? "revoked" : "");
+      const used = a.last_used_at ? "last used " + new Date(a.last_used_at).toLocaleString() : "never used";
+      item.append(el("b", "", a.name), el("span", "", a.role), el("span", "", a.token_hint),
+        el("span", "", a.revoked_at ? "revoked by " + a.revoked_by : used));
+      if (!a.revoked_at) {
+        const revoke = el("button", "refuse", "Revoke");
+        revoke.type = "button";
+        revoke.onclick = async () => {
+          revoke.disabled = true;
+          const r = await accountsCall("/api/accounts/revoke", { id: a.id });
+          $("accountStatus").textContent = r && r.ok ? a.name + "'s token no longer works." : "Could not revoke.";
+          loadAccounts();
+        };
+        item.append(revoke);
+      }
+      list.append(item);
+    }
+  }
+  $("access").addEventListener("toggle", () => { if ($("access").open) loadAccounts(); });
+  $("accountForm").onsubmit = async (event) => {
+    event.preventDefault();
+    $("accountStatus").textContent = "Creating…";
+    const result = await accountsCall("/api/accounts", { name: $("accountName").value, role: $("accountRole").value });
+    if (!result) return;
+    if (!result.ok) { $("accountStatus").textContent = ACCOUNT_ERRORS[result.reason] || "Could not create it."; return; }
+    $("accountStatus").textContent = "";
+    $("accountName").value = "";
+    $("newTokenFor").textContent = result.account.name + " (" + result.account.role + ")";
+    $("newTokenValue").textContent = result.token;
+    $("copyToken").dataset.link = location.origin + "/#token=" + encodeURIComponent(result.token);
+    $("newToken").hidden = false;
+    loadAccounts();
+  };
+  $("copyToken").onclick = async () => {
+    try { await navigator.clipboard.writeText($("copyToken").dataset.link); $("copyToken").textContent = "Copied"; }
+    catch (error) { $("copyToken").textContent = "Select the token above and copy it"; }
+  };
+
   // No token, or a wrong one: ask for it here instead of needing a terminal.
   function askForToken(rejected) {
     $("mode").textContent = "Sign in to approve payments"; $("mode").className = "down";
-    $("signout").hidden = true;
+    $("signout").hidden = true; $("whoami").textContent = ""; me = null;
     const form = $("signin"), wasHidden = form.hidden;
     form.hidden = false;
-    $("signinError").textContent = rejected ? "That token didn't work. Check for a missing character and try again." : "";
+    $("signinError").textContent = rejected
+      ? "That token doesn't work. It may have a missing character, or the owner may have revoked it." : "";
     if (wasHidden) $("tokenInput").focus();
   }
   $("signin").onsubmit = (event) => {

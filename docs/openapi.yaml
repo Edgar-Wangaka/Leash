@@ -30,6 +30,8 @@ tags:
     description: The policy in force, today's spend and recent decisions.
   - name: approvals
     description: The human approves or denies payments held for review.
+  - name: accounts
+    description: Named access tokens for the people who use the dashboard, each with a role.
   - name: settings
     description: The human changes the spending limits, within fixed ranges.
   - name: testing
@@ -174,6 +176,89 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SettingsResult" }
+
+  /api/accounts:
+    get:
+      tags: [accounts]
+      operationId: listAccounts
+      summary: The dashboard accounts (owner only)
+      description: Every account, active and revoked. Tokens are never returned; only their first characters (`token_hint`).
+      responses:
+        "200":
+          description: The accounts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accounts: { type: array, items: { $ref: "#/components/schemas/Account" } }
+                  roles: { type: array, items: { type: string } }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [accounts]
+      operationId: createAccount
+      summary: Create an account and get its token (owner only)
+      description: |
+        The token is in this response only; Leash stores just its SHA-256 hash.
+        Roles: `viewer` (read only), `approver` (approve, deny, run the agent,
+        change limits), `owner` (also manage accounts).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, role]
+              properties:
+                name: { type: string, maxLength: 60 }
+                role: { type: string, enum: [viewer, approver, owner] }
+      responses:
+        "200":
+          description: Created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  account: { $ref: "#/components/schemas/Account" }
+                  token: { type: string, description: Shown once. Starts with `lsh_`. }
+        "400":
+          description: "`reason`: invalid_name, invalid_role, name_taken or too_many_accounts."
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/accounts/revoke:
+    post:
+      tags: [accounts]
+      operationId: revokeAccount
+      summary: Revoke an account's token (owner only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+      responses:
+        "200":
+          description: Revoked; the token stops working at once.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/TokenRequired" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: No such active account.
+          content:
+            application/json:
+              schema: { type: object }
 
   /api/simulate:
     post:
@@ -484,6 +569,18 @@ components:
         merchant_allowlist:
           type: array
           items: { type: string, format: email }
+    Account:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        role: { type: string, enum: [owner, approver, viewer] }
+        token_hint: { type: string, description: "The first characters of the token, to tell tokens apart." }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
+        revoked_by: { type: [string, "null"] }
+        last_used_at: { type: [string, "null"], format: date-time }
     SettingsResult:
       type: object
       required: [ok, reason]
@@ -553,6 +650,12 @@ components:
           type: array
           items: { $ref: "#/components/schemas/Decision" }
         settings: { $ref: "#/components/schemas/Settings" }
+        me:
+          type: object
+          description: Who is signed in, and their role (owner, approver or viewer).
+          properties:
+            name: { type: string }
+            role: { type: string, enum: [owner, approver, viewer] }
         agent:
           type: object
           description: Which model the Ask-the-agent box uses (never the key).
