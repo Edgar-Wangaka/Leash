@@ -15,7 +15,7 @@ OFFSET="${OFFSET:-1.3}"
 RAW="$HOME/Desktop/leash-voice.wav"
 OUT="$HOME/Desktop/leash-demo-final.mp4"
 
-DUR=$("$FFMPEG" -hide_banner -i "$VIDEO" 2>&1 | sed -n 's/.*Duration: \([0-9:.]*\).*/\1/p' \
+DUR=$({ "$FFMPEG" -hide_banner -i "$VIDEO" 2>&1 || true; } | sed -n 's/.*Duration: \([0-9:.]*\).*/\1/p' \
       | awk -F: '{print $1*3600 + $2*60 + $3}')
 if [ "$MIX_ONLY" = 0 ]; then
 echo "Video: $VIDEO (${DUR}s). Mic: $MIC"
